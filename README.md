@@ -56,6 +56,23 @@ app/src/main/cpp/
   audio/      AudioGraph (native stub → full duplex + WAV writers)
 ```
 
+## Install with Obtainium (sideload updates)
+
+The repo is **public**. Install and update Timber from GitHub Releases with [Obtainium](https://github.com/ImranR98/Obtainium) — no Play Store.
+
+1. Install Obtainium from its GitHub Releases (or F-Droid).
+2. **Add App** → source **GitHub**.
+3. Repo URL: `https://github.com/zakjholt/timber`
+4. Suggested options:
+   - **APK filter:** `timber-.*-release\.apk` (or `\.apk$`)
+   - **Include prereleases:** off (unless you want hyphenated tags like `v0.2.0-rc.1`)
+   - Release / tag tracking: default GitHub Releases
+5. Add → install the latest Release APK → Obtainium will offer updates when new `v*` Releases appear.
+
+Release asset naming: `timber-<versionName>-release.apk` (e.g. `timber-0.1.0-release.apk`). Tags: `v0.1.0`.
+
+**Signing:** keepable installs need a stable upload keystore in GitHub Actions secrets. Generate and back it up **before** the first install you care about keeping — see [docs/RELEASE.md](docs/RELEASE.md).
+
 ## Build
 
 Open in Android Studio (or use the Gradle wrapper once the Android SDK/NDK are installed):
@@ -67,11 +84,12 @@ export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
 
 Required on the machine: Android SDK 35, NDK (for `libtimber_audio`), and a device/emulator with USB host for MODX testing.
 
+Release / CI signing details: [docs/RELEASE.md](docs/RELEASE.md).
+
 ## Next implementation slices
 
-1. Wire Oboe/AAudio duplex callbacks + real meters
-2. Non-blocking WAV writers for armed stems + master + `take.json` manifest
-3. MIDI output port open/send + event playback on the clock thread
-4. Part length / quantize / swing sheets
-5. Song arrangement mode
-6. First insert FX (EQ) behind the existing chain slots
+1. MIDI I/O + Part looper + per-track device/port/channel routing (Slice 1)
+2. Song arrangement playback + editor (Slice 2)
+3. Sequencer depth + persistence + stage UX harden (Slice 3)
+4. MIDI clock master/slave — V1.x (Slice 4)
+5. In-app audio / Path B stems — deferred (external mixer for now)

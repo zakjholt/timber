@@ -5,6 +5,24 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+fun propOrEnv(name: String): String? =
+    (project.findProperty(name) as String?)?.takeIf { it.isNotBlank() }
+        ?: System.getenv(name)?.takeIf { it.isNotBlank() }
+
+val releaseVersionName = propOrEnv("VERSION_NAME") ?: "0.1.0"
+val releaseVersionCode = propOrEnv("VERSION_CODE")?.toIntOrNull() ?: 1
+
+val keystorePath = propOrEnv("TIMBER_KEYSTORE_FILE")
+val keystorePassword = propOrEnv("TIMBER_KEYSTORE_PASSWORD")
+val keyAlias = propOrEnv("TIMBER_KEY_ALIAS")
+val keyPassword = propOrEnv("TIMBER_KEY_PASSWORD")
+val hasReleaseSigning =
+    !keystorePath.isNullOrBlank() &&
+        !keystorePassword.isNullOrBlank() &&
+        !keyAlias.isNullOrBlank() &&
+        !keyPassword.isNullOrBlank() &&
+        file(keystorePath).exists()
+
 android {
     namespace = "dev.timber.app"
     compileSdk = 35
@@ -13,8 +31,8 @@ android {
         applicationId = "dev.timber.app"
         minSdk = 28
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = releaseVersionCode
+        versionName = releaseVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -30,6 +48,17 @@ android {
         }
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(keystorePath!!)
+                storePassword = keystorePassword
+                this.keyAlias = keyAlias
+                this.keyPassword = keyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -37,6 +66,11 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+            // Without TIMBER_* signing env/props, assembleRelease produces an
+            // unsigned APK (fine for CI validation; not for keepable installs).
         }
     }
 
