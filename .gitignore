@@ -17,8 +17,6 @@ bin/
 gen/
 out/
 
-# Release signing — never commit keystores or decoded secrets
 *.jks
 *.keystore
-/keystore/
 /signing/

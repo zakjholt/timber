@@ -69,8 +69,6 @@ android {
             if (hasReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
             }
-            // Without TIMBER_* signing env/props, assembleRelease produces an
-            // unsigned APK (fine for CI validation; not for keepable installs).
         }
     }
 

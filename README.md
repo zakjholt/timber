@@ -56,35 +56,23 @@ app/src/main/cpp/
   audio/      AudioGraph (native stub → full duplex + WAV writers)
 ```
 
-## Install with Obtainium (sideload updates)
+## Install (Obtainium)
 
-The repo is **public**. Install and update Timber from GitHub Releases with [Obtainium](https://github.com/ImranR98/Obtainium) — no Play Store.
+1. Install [Obtainium](https://github.com/ImranR98/Obtainium).
+2. Add App → GitHub → `https://github.com/zakjholt/timber`
+3. APK filter: `timber-.*-release\.apk` · Include prereleases: off
+4. Install / update from GitHub Releases (`timber-<version>-release.apk`, tags `v0.1.0`).
 
-1. Install Obtainium from its GitHub Releases (or F-Droid).
-2. **Add App** → source **GitHub**.
-3. Repo URL: `https://github.com/zakjholt/timber`
-4. Suggested options:
-   - **APK filter:** `timber-.*-release\.apk` (or `\.apk$`)
-   - **Include prereleases:** off (unless you want hyphenated tags like `v0.2.0-rc.1`)
-   - Release / tag tracking: default GitHub Releases
-5. Add → install the latest Release APK → Obtainium will offer updates when new `v*` Releases appear.
-
-Release asset naming: `timber-<versionName>-release.apk` (e.g. `timber-0.1.0-release.apk`). Tags: `v0.1.0`.
-
-**Signing:** keepable installs need a stable upload keystore in GitHub Actions secrets. Generate and back it up **before** the first install you care about keeping — see [docs/RELEASE.md](docs/RELEASE.md).
+Publishing a release (keystore secrets, first tag): [docs/RELEASE.md](docs/RELEASE.md).
 
 ## Build
-
-Open in Android Studio (or use the Gradle wrapper once the Android SDK/NDK are installed):
 
 ```bash
 export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
 ./gradlew :app:assembleDebug
 ```
 
-Required on the machine: Android SDK 35, NDK (for `libtimber_audio`), and a device/emulator with USB host for MODX testing.
-
-Release / CI signing details: [docs/RELEASE.md](docs/RELEASE.md).
+Needs Android SDK 35, NDK, and a USB-host device/emulator for MODX testing.
 
 ## Next implementation slices
 
