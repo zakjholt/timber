@@ -14,13 +14,14 @@ val releaseVersionCode = propOrEnv("VERSION_CODE")?.toIntOrNull() ?: 1
 
 val keystorePath = propOrEnv("TIMBER_KEYSTORE_FILE")
 val keystorePassword = propOrEnv("TIMBER_KEYSTORE_PASSWORD")
-val keyAlias = propOrEnv("TIMBER_KEY_ALIAS")
-val keyPassword = propOrEnv("TIMBER_KEY_PASSWORD")
+// Avoid SigningConfig DSL shadowing of keyAlias/keyPassword property names.
+val signingKeyAlias = propOrEnv("TIMBER_KEY_ALIAS")
+val signingKeyPassword = propOrEnv("TIMBER_KEY_PASSWORD")
 val hasReleaseSigning =
     !keystorePath.isNullOrBlank() &&
         !keystorePassword.isNullOrBlank() &&
-        !keyAlias.isNullOrBlank() &&
-        !keyPassword.isNullOrBlank() &&
+        !signingKeyAlias.isNullOrBlank() &&
+        !signingKeyPassword.isNullOrBlank() &&
         file(keystorePath).exists()
 
 android {
@@ -53,8 +54,8 @@ android {
             create("release") {
                 storeFile = file(keystorePath!!)
                 storePassword = keystorePassword
-                this.keyAlias = keyAlias
-                this.keyPassword = keyPassword
+                keyAlias = signingKeyAlias
+                keyPassword = signingKeyPassword
             }
         }
     }
