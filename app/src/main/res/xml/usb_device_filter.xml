@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Yamaha USB audio/MIDI class-compliant devices typically use vendor 0x0499.
+  Exact product IDs vary by MODX M model/firmware; host discovery still works
+  without a match, but this enables auto-permission prompts on attach.
+-->
+<resources>
+    <usb-device vendor-id="1177" />
+</resources>
