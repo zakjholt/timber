@@ -66,6 +66,32 @@ Publishing a release (keystore secrets, first tag): [docs/RELEASE.md](docs/RELEA
 
 Needs Android SDK 35, NDK, and a USB-host device for MODX testing.
 
+### Debug APK (sideload + MIDI logcat)
+
+Debug builds log every MIDI input on **all** open ports under tag `TimberMidi`.
+
+**Local**
+
+```bash
+./gradlew :app:assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+**CI:** Actions → **Debug APK** → Run workflow (or open a PR that touches MIDI). Download the `timber-debug` artifact (`timber-debug.apk`), then:
+
+```bash
+adb install -r timber-debug.apk
+```
+
+**Capture logs** (OTG + MODX connected, Local Control off):
+
+```bash
+adb logcat -c
+adb logcat -s TimberMidi:I '*:S'
+```
+
+Then in Timber: confirm device names under the title → **Record in** → try each MODX input port with **Omni** → arm a track → **Record** → wait for count-in to finish → play notes. Look for `IN ... wouldRecord=` lines; `selectedIn=false` means notes arrived on a different port than Record in.
+
 ## Manual test (Pixel 11 Pro + MODX)
 
 1. Install debug APK; MODX **Local Control off**.

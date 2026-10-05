@@ -40,6 +40,7 @@ class MidiEngine(
         val deviceId: Int,
         val portIndex: Int,
         val deviceName: String,
+        val productName: String,
         val portName: String?,
         val isModxFamily: Boolean,
     ) {
@@ -82,18 +83,30 @@ class MidiEngine(
     private val outputPorts = ConcurrentHashMap<String, MidiInputPort>()
     private val inputPorts = ConcurrentHashMap<String, MidiOutputPort>()
     private val inputReceivers = ConcurrentHashMap<String, MidiReceiver>()
+    private val inputPortInfo = ConcurrentHashMap<String, PortInfo>()
 
     private val deviceCallback = object : MidiManager.DeviceCallback() {
-        override fun onDeviceAdded(device: MidiDeviceInfo) = refreshDevices()
+        override fun onDeviceAdded(device: MidiDeviceInfo) {
+            MidiDebugLog.i(
+                "deviceAdded id=${device.id} name=\"${deviceDisplayName(device)}\" " +
+                    "product=\"${deviceProductName(device)}\" " +
+                    "inPorts=${device.ports.count { it.type == MidiDeviceInfo.PortInfo.TYPE_OUTPUT }} " +
+                    "outPorts=${device.ports.count { it.type == MidiDeviceInfo.PortInfo.TYPE_INPUT }}",
+            )
+            refreshDevices()
+        }
 
         override fun onDeviceRemoved(device: MidiDeviceInfo) {
+            MidiDebugLog.i("deviceRemoved id=${device.id} name=\"${deviceDisplayName(device)}\"")
             closeDevice(device.id)
             refreshDevices()
         }
     }
 
     init {
+        MidiDebugLog.i("MidiEngine init debugLogging=${MidiDebugLog.enabled}")
         midiManager?.registerDeviceCallback(deviceCallback, mainHandler)
+            ?: MidiDebugLog.w("MidiManager is null — no USB MIDI")
         refreshDevices()
     }
 
@@ -111,21 +124,46 @@ class MidiEngine(
 
         for (info in devices) {
             val name = deviceDisplayName(info)
-            val isModx = ModxMProfile.looksLikeModxFamily(name, null)
+            val product = deviceProductName(info)
+            val isModx = ModxMProfile.looksLikeModxFamily(name, null) ||
+                ModxMProfile.looksLikeModxFamily(product, null)
             for (port in info.ports) {
                 val portInfo = PortInfo(
                     deviceId = info.id,
                     portIndex = port.portNumber,
                     deviceName = name,
+                    productName = product,
                     portName = port.name,
                     isModxFamily = isModx,
                 )
                 when (port.type) {
-                    MidiDeviceInfo.PortInfo.TYPE_OUTPUT -> inputs += portInfo
+                    // Device OUTPUT port = host receives (our MIDI in).
+                    MidiDeviceInfo.PortInfo.TYPE_OUTPUT -> {
+                        inputs += portInfo
+                        inputPortInfo[portKey(info.id, port.portNumber)] = portInfo
+                    }
+                    // Device INPUT port = host sends (our MIDI out).
                     MidiDeviceInfo.PortInfo.TYPE_INPUT -> outputs += portInfo
                 }
             }
             openDeviceIfNeeded(info)
+        }
+
+        MidiDebugLog.i(
+            "refreshDevices devices=${devices.size} inputs=${inputs.size} outputs=${outputs.size} " +
+                "names=$names observeAllInputs=${MidiDebugLog.enabled}",
+        )
+        for (port in inputs) {
+            MidiDebugLog.i(
+                "availableIn product=\"${port.productName}\" device=\"${port.deviceName}\" " +
+                    "id=${port.deviceId} port=${port.portIndex} name=\"${port.portName}\" modx=${port.isModxFamily}",
+            )
+        }
+        for (port in outputs) {
+            MidiDebugLog.i(
+                "availableOut product=\"${port.productName}\" device=\"${port.deviceName}\" " +
+                    "id=${port.deviceId} port=${port.portIndex} name=\"${port.portName}\" modx=${port.isModxFamily}",
+            )
         }
 
         _state.update {
@@ -137,7 +175,7 @@ class MidiEngine(
                 song = ensureTrackOutputs(it.song, outputs),
             )
         }
-        reconnectRecordInput()
+        reconnectInputReceivers()
     }
 
     fun setSong(song: Song) {
@@ -153,13 +191,15 @@ class MidiEngine(
 
     fun setRecordInput(endpoint: MidiEndpointRef) {
         _state.update { it.copy(recordInput = it.recordInput.copy(endpoint = endpoint)) }
-        reconnectRecordInput()
+        MidiDebugLog.i("setRecordInput ${endpoint.displayName} id=${endpoint.deviceId} port=${endpoint.portIndex}")
+        reconnectInputReceivers()
     }
 
     /** null = Omni */
     fun setRecordListenChannel(channel: Int?) {
         require(channel == null || channel in 1..16)
         _state.update { it.copy(recordInput = it.recordInput.copy(listenChannel = channel)) }
+        MidiDebugLog.i("setRecordListenChannel ${channel ?: "Omni"}")
     }
 
     fun setTrackOutput(trackId: Int, endpoint: MidiEndpointRef, channel: Int) {
@@ -173,10 +213,12 @@ class MidiEngine(
         if (running.getAndSet(true)) {
             if (_state.value.transport == TransportState.Stopped) {
                 _state.update { it.copy(transport = TransportState.Playing) }
+                MidiDebugLog.i("transport=Playing (resume)")
             }
             return
         }
         _state.update { it.copy(transport = TransportState.Playing, countInBeatsRemaining = 0) }
+        MidiDebugLog.i("transport=Playing")
         startClock()
     }
 
@@ -190,6 +232,7 @@ class MidiEngine(
         _state.update {
             it.copy(transport = TransportState.Stopped, positionTicks = 0, countInBeatsRemaining = 0)
         }
+        MidiDebugLog.i("transport=Stopped")
         sendPanic()
     }
 
@@ -198,10 +241,12 @@ class MidiEngine(
             TransportState.Recording -> {
                 commitRecording()
                 _state.update { it.copy(transport = TransportState.Playing, countInBeatsRemaining = 0) }
+                MidiDebugLog.i("transport=Playing (punch out) recordedEvents committed")
             }
             TransportState.CountIn -> {
                 countInTicksLeft.set(0)
                 _state.update { it.copy(transport = TransportState.Playing, countInBeatsRemaining = 0) }
+                MidiDebugLog.i("transport=Playing (count-in cancelled)")
             }
             TransportState.Playing, TransportState.Stopped -> {
                 recordBuffer.clear()
@@ -210,6 +255,7 @@ class MidiEngine(
                 if (beats <= 0) {
                     if (!running.get()) play()
                     _state.update { it.copy(transport = TransportState.Recording, countInBeatsRemaining = 0) }
+                    MidiDebugLog.i("transport=Recording (no count-in)")
                     return
                 }
                 countInTicksLeft.set(beats.toLong() * PPQN)
@@ -222,6 +268,7 @@ class MidiEngine(
                         countInBeats = beats,
                     )
                 }
+                MidiDebugLog.i("transport=CountIn beats=$beats")
                 if (!running.get()) {
                     running.set(true)
                     startClock()
@@ -230,11 +277,21 @@ class MidiEngine(
         }
     }
 
-    fun onIncomingMidi(data: ByteArray, offset: Int, count: Int, timestampNs: Long) {
+    fun onIncomingMidi(
+        data: ByteArray,
+        offset: Int,
+        count: Int,
+        timestampNs: Long,
+        portKey: String,
+        isSelectedRecordPort: Boolean,
+    ) {
         if (count <= 0) return
         val snapshot = _state.value
         val status = data[offset].toInt() and 0xFF
-        if (status >= 0xF8) return
+        if (status >= 0xF8) {
+            // Clock / realtime — log sparsely only if debug wants everything; skip to avoid spam.
+            return
+        }
 
         val (type, channel) = MidiPlayback.parseStatus(status)
         val d1 = if (count > 1) data[offset + 1].toInt() and 0xFF else 0
@@ -243,6 +300,36 @@ class MidiEngine(
 
         val listen = snapshot.recordInput.listenChannel
         val channelOk = listen == null || channel == listen
+        val wouldRecord =
+            isSelectedRecordPort &&
+                channelOk &&
+                snapshot.transport == TransportState.Recording
+
+        if (MidiDebugLog.enabled) {
+            val info = inputPortInfo[portKey]
+            MidiDebugLog.i(
+                MidiDebugFormat.formatIncoming(
+                    productName = info?.productName.orEmpty(),
+                    deviceName = info?.deviceName ?: "?",
+                    deviceId = info?.deviceId ?: portKey.substringBefore(':').toIntOrNull() ?: -1,
+                    portIndex = info?.portIndex ?: portKey.substringAfter(':').toIntOrNull() ?: -1,
+                    portName = info?.portName,
+                    timestampNs = timestampNs,
+                    status = status,
+                    dataBytes = MidiDebugFormat.formatBytes(data, offset, count),
+                    typeLabel = MidiDebugFormat.describeType(normalizedType, d1, d2),
+                    channel = channel,
+                    listenChannel = listen,
+                    channelOk = channelOk,
+                    isSelectedRecordPort = isSelectedRecordPort,
+                    transport = snapshot.transport,
+                    wouldRecord = wouldRecord,
+                ),
+            )
+        }
+
+        // Thru + record only from the selected record-in port (debug may observe others).
+        if (!isSelectedRecordPort) return
 
         if (channelOk) {
             val part = activePart()
@@ -327,6 +414,7 @@ class MidiEngine(
                         _state.update {
                             it.copy(transport = TransportState.Recording, countInBeatsRemaining = 0)
                         }
+                        MidiDebugLog.i("transport=Recording (count-in done)")
                     }
                 }
 
@@ -409,11 +497,19 @@ class MidiEngine(
             ensurePortsOpen(info, it)
             return
         }
+        MidiDebugLog.i("openDevice request id=${info.id} name=\"${deviceDisplayName(info)}\"")
         midiManager.openDevice(info, { device ->
-            if (device == null) return@openDevice
+            if (device == null) {
+                MidiDebugLog.e(
+                    "openDevice FAILED (null) id=${info.id} name=\"${deviceDisplayName(info)}\" " +
+                        "— USB permission or exclusive lock?",
+                )
+                return@openDevice
+            }
+            MidiDebugLog.i("openDevice OK id=${info.id} name=\"${deviceDisplayName(info)}\"")
             openDevices[info.id] = device
             ensurePortsOpen(info, device)
-            reconnectRecordInput()
+            reconnectInputReceivers()
         }, mainHandler)
     }
 
@@ -424,16 +520,30 @@ class MidiEngine(
                 MidiDeviceInfo.PortInfo.TYPE_INPUT -> {
                     if (!outputPorts.containsKey(key)) {
                         try {
-                            device.openInputPort(port.portNumber)?.let { outputPorts[key] = it }
-                        } catch (_: Exception) {
+                            val opened = device.openInputPort(port.portNumber)
+                            if (opened != null) {
+                                outputPorts[key] = opened
+                                MidiDebugLog.i("openedOutPort $key name=\"${port.name}\"")
+                            } else {
+                                MidiDebugLog.w("openInputPort returned null $key name=\"${port.name}\"")
+                            }
+                        } catch (t: Exception) {
+                            MidiDebugLog.e("openInputPort failed $key", t)
                         }
                     }
                 }
                 MidiDeviceInfo.PortInfo.TYPE_OUTPUT -> {
                     if (!inputPorts.containsKey(key)) {
                         try {
-                            device.openOutputPort(port.portNumber)?.let { inputPorts[key] = it }
-                        } catch (_: Exception) {
+                            val opened = device.openOutputPort(port.portNumber)
+                            if (opened != null) {
+                                inputPorts[key] = opened
+                                MidiDebugLog.i("openedInPort $key name=\"${port.name}\"")
+                            } else {
+                                MidiDebugLog.w("openOutputPort returned null $key name=\"${port.name}\"")
+                            }
+                        } catch (t: Exception) {
+                            MidiDebugLog.e("openOutputPort failed $key", t)
                         }
                     }
                 }
@@ -441,36 +551,75 @@ class MidiEngine(
         }
     }
 
-    private fun reconnectRecordInput() {
+    /**
+     * Attach receivers. Release: selected record-in only.
+     * Debug: every open input port so logcat shows which device/port actually emits.
+     */
+    private fun reconnectInputReceivers() {
         val endpoint = _state.value.recordInput.endpoint
         val targetKey = if (endpoint.isSet) {
             portKey(endpoint.deviceId, endpoint.portIndex)
         } else {
             _state.value.availableInputs.firstOrNull()?.let { portKey(it.deviceId, it.portIndex) }
-        } ?: return
+        }
+
+        val observeAll = MidiDebugLog.enabled
+        MidiDebugLog.i(
+            "reconnectInputReceivers target=${targetKey ?: "none"} " +
+                "openInputs=${inputPorts.keys.sorted()} observeAll=$observeAll " +
+                "listen=${_state.value.recordInput.listenChannel ?: "Omni"}",
+        )
+
+        if (targetKey == null && !observeAll) return
 
         for ((key, port) in inputPorts) {
             val existing = inputReceivers[key]
-            if (key == targetKey) {
+            val shouldListen = observeAll || key == targetKey
+            if (shouldListen) {
                 if (existing == null) {
+                    val selectedAtConnect = key == targetKey
                     val receiver = object : MidiReceiver() {
                         override fun onSend(msg: ByteArray, offset: Int, count: Int, timestamp: Long) {
-                            onIncomingMidi(msg, offset, count, timestamp)
+                            val selectedNow = key == selectedRecordPortKey()
+                            onIncomingMidi(msg, offset, count, timestamp, key, selectedNow)
                         }
                     }
                     try {
                         port.connect(receiver)
                         inputReceivers[key] = receiver
-                    } catch (_: Exception) {
+                        MidiDebugLog.i(
+                            "connectedReceiver $key selected=$selectedAtConnect " +
+                                "info=${inputPortInfo[key]?.label}",
+                        )
+                    } catch (t: Exception) {
+                        MidiDebugLog.e("connectReceiver failed $key", t)
                     }
                 }
             } else if (existing != null) {
                 try {
                     port.disconnect(existing)
-                } catch (_: Exception) {
+                    MidiDebugLog.i("disconnectedReceiver $key")
+                } catch (t: Exception) {
+                    MidiDebugLog.w("disconnectReceiver failed $key", t)
                 }
                 inputReceivers.remove(key)
             }
+        }
+
+        if (targetKey != null && !inputPorts.containsKey(targetKey)) {
+            MidiDebugLog.w(
+                "selected record-in $targetKey not open yet " +
+                    "(openInputs=${inputPorts.keys.sorted()}) — waiting for openDevice",
+            )
+        }
+    }
+
+    private fun selectedRecordPortKey(): String? {
+        val endpoint = _state.value.recordInput.endpoint
+        return if (endpoint.isSet) {
+            portKey(endpoint.deviceId, endpoint.portIndex)
+        } else {
+            _state.value.availableInputs.firstOrNull()?.let { portKey(it.deviceId, it.portIndex) }
         }
     }
 
@@ -484,6 +633,7 @@ class MidiEngine(
         inputPorts.keys.filter { it.startsWith("$deviceId:") }.forEach { key ->
             val receiver = inputReceivers.remove(key)
             val port = inputPorts.remove(key)
+            inputPortInfo.remove(key)
             try {
                 if (receiver != null) port?.disconnect(receiver)
                 port?.close()
@@ -494,6 +644,7 @@ class MidiEngine(
             openDevices.remove(deviceId)?.close()
         } catch (_: Exception) {
         }
+        MidiDebugLog.i("closeDevice id=$deviceId")
     }
 
     private fun closeAllDevices() {
@@ -508,6 +659,7 @@ class MidiEngine(
             return current
         }
         val preferred = inputs.firstOrNull { it.isModxFamily } ?: inputs.first()
+        MidiDebugLog.i("preferDefaultInput → ${preferred.label} (id=${preferred.deviceId} port=${preferred.portIndex})")
         return current.copy(endpoint = preferred.toRef())
     }
 
@@ -536,6 +688,11 @@ class MidiEngine(
         info.properties.getString(MidiDeviceInfo.PROPERTY_NAME)
             ?: info.properties.getString(MidiDeviceInfo.PROPERTY_PRODUCT)
             ?: "MIDI ${info.id}"
+
+    private fun deviceProductName(info: MidiDeviceInfo): String =
+        info.properties.getString(MidiDeviceInfo.PROPERTY_PRODUCT)
+            ?: info.properties.getString(MidiDeviceInfo.PROPERTY_NAME)
+            ?: ""
 
     private fun portKey(deviceId: Int, portIndex: Int): String = "$deviceId:$portIndex"
 }
