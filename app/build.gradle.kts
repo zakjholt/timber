@@ -5,9 +5,17 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
-fun propOrEnv(name: String): String? =
-    (project.findProperty(name) as String?)?.takeIf { it.isNotBlank() }
-        ?: System.getenv(name)?.takeIf { it.isNotBlank() }
+fun propOrEnv(name: String): String? {
+    val raw = (project.findProperty(name) as String?) ?: System.getenv(name) ?: return null
+    var value = raw.trim()
+    if (value.length >= 2) {
+        val q = value.first()
+        if ((q == '"' || q == '\'') && value.last() == q) {
+            value = value.substring(1, value.lastIndex).trim()
+        }
+    }
+    return value.takeIf { it.isNotBlank() }
+}
 
 val releaseVersionName = propOrEnv("VERSION_NAME") ?: "0.1.0"
 val releaseVersionCode = propOrEnv("VERSION_CODE")?.toIntOrNull() ?: 1

@@ -91,13 +91,70 @@ jobs:
           TIMBER_KEY_PASSWORD: ${{ secrets.TIMBER_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          if [[ -n "${TIMBER_KEYSTORE_BASE64:-}" && -n "${TIMBER_KEYSTORE_PASSWORD:-}" \
-                && -n "${TIMBER_KEY_ALIAS:-}" && -n "${TIMBER_KEY_PASSWORD:-}" ]]; then
+          trim() {
+            local v="$1"
+            v="${v#"${v%%[![:space:]]*}"}"
+            v="${v%"${v##*[![:space:]]}"}"
+            if [[ "${#v}" -ge 2 ]]; then
+              local a="${v:0:1}" b="${v: -1}"
+              if [[ "$a" == "$b" && ( "$a" == "'" || "$a" == '"' ) ]]; then
+                v="${v:1:${#v}-2}"
+                v="${v#"${v%%[![:space:]]*}"}"
+                v="${v%"${v##*[![:space:]]}"}"
+              fi
+            fi
+            printf '%s' "$v"
+          }
+          STORE_PASS="$(trim "${TIMBER_KEYSTORE_PASSWORD:-}")"
+          KEY_PASS="$(trim "${TIMBER_KEY_PASSWORD:-}")"
+          KEY_ALIAS="$(trim "${TIMBER_KEY_ALIAS:-}")"
+          if [[ -n "${TIMBER_KEYSTORE_BASE64:-}" && -n "$STORE_PASS" \
+                && -n "$KEY_ALIAS" && -n "$KEY_PASS" ]]; then
             mkdir -p signing
             KEYSTORE_PATH="$GITHUB_WORKSPACE/signing/timber-upload.jks"
-            echo "$TIMBER_KEYSTORE_BASE64" | base64 -d > "$KEYSTORE_PATH"
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-            echo "keystore_path=$KEYSTORE_PATH" >> "$GITHUB_OUTPUT"
+            printf '%s' "$TIMBER_KEYSTORE_BASE64" | tr -d '[:space:]' | base64 -d > "$KEYSTORE_PATH"
+            if ! keytool -list -keystore "$KEYSTORE_PATH" -storepass "$STORE_PASS" -alias "$KEY_ALIAS" >/dev/null 2>&1; then
+              echo "::error::Keystore/store password/alias invalid (keytool -list failed)."
+              exit 1
+            fi
+            # Unlock private key; if KEY_PASS fails, try STORE_PASS (common same-password keystores).
+            DEST="$(mktemp /tmp/timber-sign.XXXXXX.p12)"
+            cleanup() { rm -f "$DEST"; }
+            trap cleanup EXIT
+            RESOLVED_KEY_PASS="$KEY_PASS"
+            if ! keytool -importkeystore -noprompt \
+                  -srckeystore "$KEYSTORE_PATH" -srcstoretype JKS \
+                  -srcalias "$KEY_ALIAS" -srcstorepass "$STORE_PASS" -srckeypass "$KEY_PASS" \
+                  -destkeystore "$DEST" -deststoretype PKCS12 \
+                  -deststorepass tmp -destkeypass tmp >/dev/null 2>&1; then
+              rm -f "$DEST"
+              if [[ "$KEY_PASS" != "$STORE_PASS" ]] && keytool -importkeystore -noprompt \
+                    -srckeystore "$KEYSTORE_PATH" -srcstoretype JKS \
+                    -srcalias "$KEY_ALIAS" -srcstorepass "$STORE_PASS" -srckeypass "$STORE_PASS" \
+                    -destkeystore "$DEST" -deststoretype PKCS12 \
+                    -deststorepass tmp -destkeypass tmp >/dev/null 2>&1; then
+                echo "::warning::TIMBER_KEY_PASSWORD did not unlock the key; using TIMBER_KEYSTORE_PASSWORD as keypass."
+                RESOLVED_KEY_PASS="$STORE_PASS"
+              else
+                echo "::error::TIMBER_KEY_PASSWORD does not unlock the key alias (store-password fallback also failed)."
+                exit 1
+              fi
+            fi
+            {
+              echo "enabled=true"
+              echo "keystore_path=$KEYSTORE_PATH"
+            } >> "$GITHUB_OUTPUT"
+            {
+              echo "TIMBER_KEYSTORE_PASSWORD<<EOF"
+              printf '%s\n' "$STORE_PASS"
+              echo "EOF"
+              echo "TIMBER_KEY_ALIAS<<EOF"
+              printf '%s\n' "$KEY_ALIAS"
+              echo "EOF"
+              echo "TIMBER_KEY_PASSWORD<<EOF"
+              printf '%s\n' "$RESOLVED_KEY_PASS"
+              echo "EOF"
+            } >> "$GITHUB_ENV"
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
             echo "::warning::TIMBER_* secrets missing — unsigned APK artifact only (no GitHub Release)."
@@ -108,9 +165,7 @@ jobs:
           VERSION_NAME: ${{ steps.ver.outputs.version_name }}
           VERSION_CODE: ${{ steps.ver.outputs.version_code }}
           TIMBER_KEYSTORE_FILE: ${{ steps.signing.outputs.keystore_path }}
-          TIMBER_KEYSTORE_PASSWORD: ${{ secrets.TIMBER_KEYSTORE_PASSWORD }}
-          TIMBER_KEY_ALIAS: ${{ secrets.TIMBER_KEY_ALIAS }}
-          TIMBER_KEY_PASSWORD: ${{ secrets.TIMBER_KEY_PASSWORD }}
+          # Passwords/alias come from GITHUB_ENV set by Decode keystore when signing is enabled.
         run: |
           ./gradlew :app:assembleRelease \
             -PVERSION_NAME="$VERSION_NAME" \
