@@ -2,16 +2,20 @@ package dev.timber.app.ui.session
 
 import android.app.Application
 import android.content.Context
+import android.content.Intent
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.media.midi.MidiManager
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.timber.app.device.UsbAudioProbe
 import dev.timber.app.domain.audio.MeterPeak
+import dev.timber.app.domain.midi.MidiEndpointRef
 import dev.timber.app.domain.midi.TransportState
 import dev.timber.app.domain.session.SessionState
+import dev.timber.app.engine.TimberEngineService
 import dev.timber.app.engine.audio.AudioEngine
 import dev.timber.app.engine.midi.MidiEngine
 import kotlinx.coroutines.delay
@@ -35,13 +39,22 @@ data class TimberUiState(
     val tab: TimberTab = TimberTab.Sequencer,
     val session: SessionState = SessionState.bootstrap(),
     val midiDevices: List<String> = emptyList(),
+    val availableInputs: List<MidiEngine.PortInfo> = emptyList(),
+    val availableOutputs: List<MidiEngine.PortInfo> = emptyList(),
+    val recordInput: MidiEndpointRef = MidiEndpointRef(),
+    val recordListenChannel: Int? = null,
     val audioRunning: Boolean = false,
     val audioRecording: Boolean = false,
     val transport: TransportState = TransportState.Stopped,
     val positionTicks: Long = 0,
+    val countInBeatsRemaining: Int = 0,
+    val countInPulse: Int = 0,
+    val countInBeats: Int = 4,
     val deviceNotes: String = SessionState.bootstrap().deviceNotes,
     val meters: List<MeterPeak> = emptyList(),
     val masterMeter: MeterPeak = MeterPeak(channelId = -1),
+    /** Mixer tab kept in code but hidden while audio is deferred. */
+    val showMixerTab: Boolean = false,
 )
 
 class SessionViewModel(application: Application) : AndroidViewModel(application) {
@@ -53,6 +66,8 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
 
     private val _ui = MutableStateFlow(TimberUiState())
     val ui: StateFlow<TimberUiState> = _ui.asStateFlow()
+
+    private var engineServiceRunning = false
 
     private val deviceCallback = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
@@ -74,15 +89,28 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                 _ui.update {
                     it.copy(
                         midiDevices = midi.connectedDevices,
+                        availableInputs = midi.availableInputs,
+                        availableOutputs = midi.availableOutputs,
+                        recordInput = midi.recordInput.endpoint,
+                        recordListenChannel = midi.recordInput.listenChannel,
                         transport = midi.transport,
                         positionTicks = midi.positionTicks,
-                        session = it.session.copy(song = midi.song, transport = it.session.transport.copy(
-                            state = midi.transport,
-                            songPositionTicks = midi.positionTicks,
-                            tempoBpm = midi.song.tempoBpm,
-                        )),
+                        countInBeatsRemaining = midi.countInBeatsRemaining,
+                        countInPulse = midi.countInPulse,
+                        countInBeats = midi.countInBeats,
+                        session = it.session.copy(
+                            song = midi.song,
+                            transport = it.session.transport.copy(
+                                state = midi.transport,
+                                songPositionTicks = midi.positionTicks,
+                                tempoBpm = midi.song.tempoBpm,
+                                countInBeats = midi.countInBeats,
+                                currentPartId = midi.activePartId,
+                            ),
+                        ),
                     )
                 }
+                syncEngineService(midi.transport)
             }
         }
         viewModelScope.launch {
@@ -108,21 +136,29 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun selectTab(tab: TimberTab) {
+        if (tab == TimberTab.Mixer && !_ui.value.showMixerTab) return
         _ui.update { it.copy(tab = tab) }
     }
 
     fun play() = midiEngine.play()
+
     fun stop() {
         midiEngine.stop()
         if (audioEngine.state.value.isRecording) {
             audioEngine.stopRecording()
         }
+        stopEngineService()
     }
 
     fun toggleMidiRecord() = midiEngine.toggleRecord()
 
     fun armMidiTrack(trackId: Int) = midiEngine.armTrack(trackId)
     fun toggleMidiMute(trackId: Int) = midiEngine.toggleMute(trackId)
+
+    fun setRecordInput(endpoint: MidiEndpointRef) = midiEngine.setRecordInput(endpoint)
+    fun setRecordListenChannel(channel: Int?) = midiEngine.setRecordListenChannel(channel)
+    fun setTrackOutput(trackId: Int, endpoint: MidiEndpointRef, channel: Int) =
+        midiEngine.setTrackOutput(trackId, endpoint, channel)
 
     fun setChannelGain(channelId: Int, gainDb: Float) = audioEngine.setChannelGain(channelId, gainDb)
     fun toggleChannelMute(channelId: Int) = audioEngine.toggleMute(channelId)
@@ -155,6 +191,26 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         audioEngine.startRecording(takeDir.absolutePath)
     }
 
+    private fun syncEngineService(transport: TransportState) {
+        val shouldRun = transport != TransportState.Stopped
+        if (shouldRun) startEngineService() else stopEngineService()
+    }
+
+    private fun startEngineService() {
+        if (engineServiceRunning) return
+        val app = getApplication<Application>()
+        val intent = Intent(app, TimberEngineService::class.java)
+        ContextCompat.startForegroundService(app, intent)
+        engineServiceRunning = true
+    }
+
+    private fun stopEngineService() {
+        if (!engineServiceRunning) return
+        val app = getApplication<Application>()
+        app.stopService(Intent(app, TimberEngineService::class.java))
+        engineServiceRunning = false
+    }
+
     private fun renegotiateAudio() {
         val layout = UsbAudioProbe.probe(audioManager)
         audioEngine.applyLayout(
@@ -169,7 +225,8 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     override fun onCleared() {
         audioManager.unregisterAudioDeviceCallback(deviceCallback)
         audioEngine.stop()
-        midiEngine.stop()
+        midiEngine.release()
+        stopEngineService()
         super.onCleared()
     }
 }

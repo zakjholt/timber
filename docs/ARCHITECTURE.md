@@ -2,8 +2,15 @@
 
 ## Session clock
 - MIDI engine owns musical time (PPQN=96).
-- Audio recorders stamp against the same transport start.
+- Transport: Stopped → Playing; Record enters **CountIn** then **Recording**; stop panics all open outs.
+- Audio recorders (deferred) will stamp against the same transport start.
 - Future: sample-accurate MIDI→audio offset calibration for the MODX M USB round-trip.
+
+## MIDI routing (Slice 1)
+- Open ports on **any** USB MIDI device (`android.media.midi`).
+- **Global record input:** device/port + listen channel (1–16 or Omni) → armed track.
+- **Per-track output:** device + port + channel; thru always forwards to the armed track’s out (modifiers applied).
+- MODX **Local Control off** is a user setup step (see README) so keys don’t double with thru.
 
 ## Audio graph (native)
 Channel: input → insertChain* → stemTap → sendTaps* → mute/solo → pan/gain → master sum

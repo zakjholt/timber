@@ -65,7 +65,7 @@ private fun TimberAppScaffold(
         )
         Text(
             text = if (state.midiDevices.isEmpty()) {
-                "Connect MODX M via USB-C OTG"
+                "Connect USB MIDI (MODX) via USB-C OTG"
             } else {
                 state.midiDevices.joinToString()
             },
@@ -73,24 +73,43 @@ private fun TimberAppScaffold(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 16.dp),
         )
-        Spacer(Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(8.dp))
         TransportBar(
             transport = state.transport,
             positionTicks = state.positionTicks,
             tempoBpm = state.session.song.tempoBpm,
+            countInBeatsRemaining = state.countInBeatsRemaining,
+            countInPulse = state.countInPulse,
             onPlay = viewModel::play,
             onStop = viewModel::stop,
             onToggleRecord = viewModel::toggleMidiRecord,
             modifier = Modifier.padding(horizontal = 16.dp),
         )
-        Spacer(Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(12.dp))
         Box(modifier = Modifier.weight(1f)) {
             when (state.tab) {
-                TimberTab.Sequencer -> SequencerScreen(
-                    part = state.session.song.parts.firstOrNull(),
-                    onArmTrack = viewModel::armMidiTrack,
-                    onToggleMute = viewModel::toggleMidiMute,
-                )
+                TimberTab.Sequencer -> {
+                    val recordLabel = state.recordInput.displayName.ifBlank {
+                        state.availableInputs.firstOrNull()?.label ?: "No MIDI in"
+                    }
+                    SequencerScreen(
+                        part = state.session.song.parts.firstOrNull {
+                            it.id == state.session.transport.currentPartId
+                        } ?: state.session.song.parts.firstOrNull(),
+                        recordInputLabel = recordLabel,
+                        recordListenChannel = state.recordListenChannel,
+                        availableInputs = state.availableInputs,
+                        availableOutputs = state.availableOutputs,
+                        recordInput = state.recordInput,
+                        onArmTrack = viewModel::armMidiTrack,
+                        onToggleMute = viewModel::toggleMidiMute,
+                        onSetTrackOutput = viewModel::setTrackOutput,
+                        onSetRecordInput = { endpoint, listen ->
+                            viewModel.setRecordInput(endpoint)
+                            viewModel.setRecordListenChannel(listen)
+                        },
+                    )
+                }
                 TimberTab.Mixer -> MixerScreen(
                     mixer = state.session.mixer,
                     meters = state.meters,
@@ -109,19 +128,21 @@ private fun TimberAppScaffold(
                 )
             }
         }
-        NavigationBar {
-            NavigationBarItem(
-                selected = state.tab == TimberTab.Sequencer,
-                onClick = { viewModel.selectTab(TimberTab.Sequencer) },
-                icon = { Text("SEQ") },
-                label = { Text("Sequencer") },
-            )
-            NavigationBarItem(
-                selected = state.tab == TimberTab.Mixer,
-                onClick = { viewModel.selectTab(TimberTab.Mixer) },
-                icon = { Text("MIX") },
-                label = { Text("Mixer") },
-            )
+        if (state.showMixerTab) {
+            NavigationBar {
+                NavigationBarItem(
+                    selected = state.tab == TimberTab.Sequencer,
+                    onClick = { viewModel.selectTab(TimberTab.Sequencer) },
+                    icon = { Text("SEQ") },
+                    label = { Text("Sequencer") },
+                )
+                NavigationBarItem(
+                    selected = state.tab == TimberTab.Mixer,
+                    onClick = { viewModel.selectTab(TimberTab.Mixer) },
+                    icon = { Text("MIX") },
+                    label = { Text("Mixer") },
+                )
+            }
         }
     }
 }

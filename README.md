@@ -1,17 +1,23 @@
 # Timber
 
-Phone-first Android session brain: RK-008-class MIDI sequencing plus a live mixer and stem/master recorder, aimed at a Yamaha MODX M over USB.
+Phone-first Android **MIDI session brain** for a Yamaha MODX M (and other USB MIDI devices): RK-008 / Pyramid–class realtime record/loop with stage-safe portrait UX. Live mix/monitor is via an **external physical mixer** for now — in-app audio mixer/stems are deferred.
 
 ## Stack
 
 - Kotlin + Jetpack Compose (`dev.timber.app`)
-- `android.media.midi` for USB MIDI
-- Native AAudio/Oboe graph (`libtimber_audio`) for multichannel I/O, metering, and recording
-- Shared session transport across MIDI + audio
+- `android.media.midi` for USB MIDI (any attached device; MODX primary)
+- Foreground service keeps the MIDI engine alive with the screen off
+- Native audio graph remains in the repo but is **not** on the near-term path
 
-## MODX M
+## MODX M setup (required for thru)
 
-At **44.1 kHz** the MODX M can expose **10 USB outs / 4 USB ins** (keyboard perspective). Timber sees those as host inputs (stems) and host outputs (return).
+1. Connect phone ↔ MODX M **USB TO HOST** with a USB-C OTG cable.
+2. On the MODX, set **Local Control = off** (Utility / MIDI settings). Timber keeps **MIDI thru always on** while ports are open; with Local Control on, keys double (local + thru’d notes).
+3. Prefer 44.1 kHz on both sides when you also care about USB audio channel maps later.
+
+### USB audio map (deferred / reference)
+
+At **44.1 kHz** the MODX M can expose **10 USB outs / 4 USB ins** (keyboard perspective). Timber’s in-app mixer/recorder is punted; use a physical mixer for monitor/mix until that phase returns.
 
 | Host inputs (from MODX) | Role |
 |---|---|
@@ -23,26 +29,20 @@ At **44.1 kHz** the MODX M can expose **10 USB outs / 4 USB ins** (keyboard pers
 | 0–1 | Digital In L/R (route in MODX Performance → Audio In) |
 | 2–3 | Extra return if the OS exposes 4 outs |
 
-**Android class-compliant caveat:** many phones only negotiate **stereo** I/O. Timber detects channel counts at runtime and falls back to Main L/R labeling. For discrete Part stems, route MODX Parts to USB 1–8 and confirm the OS exposes those channels; otherwise keep Parts on Main for a stereo capture.
+## V1 MIDI scope (near-term)
 
-Connect phone ↔ MODX M **USB TO HOST** with a USB-C OTG cable. Prefer 44.1 kHz on both sides when you want the full channel map.
-
-## V1 scope
-
-**Sequencer**
+**Sequencer / session**
 - Song → Parts → 8 tracks
-- Realtime MIDI record / overdub, mute, arm, transport, thru
-- Non-destructive modifiers modeled (quantize / swing / transpose / filters); mixdown UI next
+- Realtime MIDI record / overdub **with count-in** into the armed track
+- Global record input (USB MIDI device/port) + listen channel **1–16 or Omni**
+- Per-track output **device + port + channel** (picker sheet)
+- Mute / arm; thru always on; panic (all notes/sound off) on stop
+- Non-destructive modifiers applied on playback/thru (transpose, velocity, filters, force channel; quantize/swing started)
+- Song arrangement + MIDI clock out (master) land in later slices
 
-**Mixer / record**
-- Per-input gain, mute, solo, meter
-- Master level + meter
-- Arm + record **stems** and **master** into `filesDir/takes/take_*/`
-
-**Architected, not built yet**
-- Mix buses + sends
-- Insert FX chains (`AudioEffect` / `EffectChainState`)
-- In-app FX suite (EQ, compressor, delay, reverb, saturation)
+**Not in this phase**
+- In-app mixer UI, AAudio duplex, Path B stem capture
+- MIDI clock slave/follow, song variations, step entry
 
 ## Project layout
 
@@ -51,9 +51,9 @@ app/src/main/java/dev/timber/app/
   domain/     MIDI, audio, session models
   device/     ModxMProfile
   engine/     MidiEngine, AudioEngine, foreground service
-  ui/         Sequencer, Mixer, Transport
+  ui/         Sequencer, Transport, routing sheets (Mixer stub hidden)
 app/src/main/cpp/
-  audio/      AudioGraph (native stub → full duplex + WAV writers)
+  audio/      AudioGraph (native stub — deferred)
 ```
 
 ## Install (Obtainium)
@@ -68,16 +68,22 @@ Publishing a release (keystore secrets, first tag): [docs/RELEASE.md](docs/RELEA
 ## Build
 
 ```bash
-export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
 ./gradlew :app:assembleDebug
 ```
 
-Needs Android SDK 35, NDK, and a USB-host device/emulator for MODX testing.
+Needs Android SDK 35, NDK, and a USB-host device for MODX testing.
+
+## Manual test (Pixel 11 Pro + MODX)
+
+1. Install a debug APK; set MODX **Local Control off**.
+2. Plug OTG → confirm device name under the Timber title.
+3. Open **Record in** → pick MODX input + Omni (or a channel).
+4. Tap a track’s routing line → pick MODX out + channel (match the MODX Part).
+5. Arm a track → **Record** → wait for count-in → play keys → **Stop** (panic) or Record again to punch out to Play.
+6. **Play** — loop should emit to the track’s port/channel; mute should silence that track; screen-off should keep the session via the foreground notification.
 
 ## Next implementation slices
 
-1. MIDI I/O + Part looper + per-track device/port/channel routing (Slice 1)
-2. Song arrangement playback + editor (Slice 2)
-3. Sequencer depth + persistence + stage UX harden (Slice 3)
-4. MIDI clock master/slave — V1.x (Slice 4)
-5. In-app audio / Path B stems — deferred (external mixer for now)
+1. Song arrangement (Parts chain) — Slice 2
+2. MIDI clock out (master), modifiers polish, persistence — Slice 3
+3. Deferred audio / Path B when monitor returns in-app

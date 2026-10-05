@@ -10,8 +10,8 @@ import androidx.core.app.NotificationCompat
 import dev.timber.app.R
 
 /**
- * Keeps audio/MIDI engines alive while the screen is off during a session.
- * Bound wiring comes next; started from the session layer when transport runs.
+ * Keeps the MIDI session engine eligible to run while the screen is off.
+ * Started/stopped from [dev.timber.app.ui.session.SessionViewModel] with transport.
  */
 class TimberEngineService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
@@ -24,8 +24,9 @@ class TimberEngineService : Service() {
         )
         val notification: Notification = NotificationCompat.Builder(this, channelId)
             .setContentTitle(getString(R.string.app_name))
-            .setContentText("Session engine running")
+            .setContentText("MIDI session running")
             .setSmallIcon(R.drawable.ic_launcher)
+            .setOngoing(true)
             .build()
         startForeground(1, notification)
         return START_STICKY

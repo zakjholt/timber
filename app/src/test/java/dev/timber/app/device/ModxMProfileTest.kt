@@ -11,7 +11,7 @@ class ModxMProfileTest {
         assertEquals(10, layout.inputChannelCount)
         assertEquals("Main L", layout.inputLabels[0])
         assertEquals("USB 8", layout.inputLabels[9])
-        assertEquals(4, layout.stereoPairs.size)
+        assertEquals(5, layout.stereoPairs.size)
         assertTrue(layout.notes.contains("Full MODX M"))
     }
 

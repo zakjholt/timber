@@ -5,6 +5,33 @@ import kotlinx.serialization.Serializable
 /** PPQN resolution for the timing engine (matches common hardware sequencers). */
 const val PPQN: Int = 96
 
+/** Unset / auto-select MIDI device id until a concrete port is chosen. */
+const val MIDI_DEVICE_UNSET: Int = -1
+
+/**
+ * Reference to a MIDI device port.
+ * [deviceId] is Android [android.media.midi.MidiDeviceInfo.getId]; may change across reconnects
+ * (Slice 3 will polish rebinding). [displayName] is for UI / future persistence hints.
+ */
+@Serializable
+data class MidiEndpointRef(
+    val deviceId: Int = MIDI_DEVICE_UNSET,
+    val portIndex: Int = 0,
+    val displayName: String = "",
+) {
+    val isSet: Boolean get() = deviceId != MIDI_DEVICE_UNSET
+}
+
+/**
+ * Global record-input selection for the session (V1: not per-armed-track).
+ * [listenChannel] null = Omni (all channels 1–16); otherwise 1–16.
+ */
+@Serializable
+data class RecordInputConfig(
+    val endpoint: MidiEndpointRef = MidiEndpointRef(),
+    val listenChannel: Int? = null,
+)
+
 @Serializable
 enum class MidiMessageType {
     NoteOn,
@@ -75,7 +102,7 @@ data class TrackModifiers(
     val filterProgramChange: Boolean = false,
     val filterAftertouch: Boolean = false,
     val filterPitchBend: Boolean = false,
-    /** null = pass original channels; 1..16 forces output channel. */
+    /** null = use track [MidiTrack.outputChannel]; 1..16 forces output channel. */
     val forceChannel: Int? = null,
 ) {
     companion object {
@@ -99,6 +126,10 @@ data class MidiTrack(
     val lengthTicks: Long? = null,
     val playMode: TrackPlayMode = TrackPlayMode.Loop,
     val armed: Boolean = false,
+    /** Playback / thru destination device + port. */
+    val output: MidiEndpointRef = MidiEndpointRef(),
+    /** MIDI channel 1–16 for this track's output (overridden by [TrackModifiers.forceChannel]). */
+    val outputChannel: Int = 1,
 )
 
 @Serializable
@@ -110,7 +141,9 @@ data class Part(
     val timeSignatureDenominator: Int = 4,
     /** null = use song/global tempo. */
     val tempoBpm: Float? = null,
-    val tracks: List<MidiTrack> = (1..8).map { MidiTrack(id = it) },
+    val tracks: List<MidiTrack> = (1..8).map {
+        MidiTrack(id = it, outputChannel = it.coerceIn(1, 16), armed = it == 1)
+    },
 ) {
     val lengthTicks: Long
         get() = lengthBeats.toLong() * PPQN
@@ -123,6 +156,10 @@ data class SongStep(
     val trackTransposes: List<Int> = List(8) { 0 },
 )
 
+/**
+ * Song document. V1 ships a single [arrangement]; keep room for named variations later
+ * without rewriting the core Part/track event model.
+ */
 @Serializable
 data class Song(
     val id: Int = 1,
@@ -147,4 +184,6 @@ data class TransportSnapshot(
     val currentPartId: Int = 1,
     val loopPart: Boolean = true,
     val tempoBpm: Float = 120f,
+    /** Beats of count-in before MIDI record (default one bar when applied from Part). */
+    val countInBeats: Int = 4,
 )

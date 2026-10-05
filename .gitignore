@@ -20,3 +20,4 @@ out/
 *.jks
 *.keystore
 /signing/
+.kotlin/
