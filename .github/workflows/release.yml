@@ -113,11 +113,12 @@ jobs:
             mkdir -p signing
             KEYSTORE_PATH="$GITHUB_WORKSPACE/signing/timber-upload.jks"
             printf '%s' "$TIMBER_KEYSTORE_BASE64" | tr -d '[:space:]' | base64 -d > "$KEYSTORE_PATH"
-            LIST_OUT="$(keytool -list -keystore "$KEYSTORE_PATH" -storepass "$STORE_PASS" -alias "$KEY_ALIAS" 2>&1)" || {
+            if ! keytool -list -keystore "$KEYSTORE_PATH" -storepass "$STORE_PASS" -alias "$KEY_ALIAS" >/dev/null 2>&1; then
               echo "::error::Keystore/store password/alias invalid (keytool -list failed)."
               exit 1
-            }
-            KS_TYPE="$(printf '%s\n' "$LIST_OUT" | awk -F': ' '/Keystore type/ {print $2; exit}' | tr -d '[:space:]')"
+            fi
+            # Keystore type is only printed when listing the whole store (not -alias).
+            KS_TYPE="$(keytool -list -keystore "$KEYSTORE_PATH" -storepass "$STORE_PASS" 2>/dev/null | awk -F': ' '/Keystore type/ {print $2; exit}' | tr -d '[:space:]')"
             echo "Keystore type: ${KS_TYPE:-unknown}"
             # dest passwords must be >= 6 chars (keytool rejects shorter).
             unlock_key() {
