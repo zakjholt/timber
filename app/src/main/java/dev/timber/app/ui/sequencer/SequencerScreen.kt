@@ -17,19 +17,36 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import dev.timber.app.domain.midi.MidiEndpointRef
 import dev.timber.app.domain.midi.MidiTrack
 import dev.timber.app.domain.midi.Part
+import dev.timber.app.engine.midi.MidiEngine
 
 @Composable
 fun SequencerScreen(
     part: Part?,
+    recordInputLabel: String,
+    recordListenChannel: Int?,
+    availableInputs: List<MidiEngine.PortInfo>,
+    availableOutputs: List<MidiEngine.PortInfo>,
+    recordInput: MidiEndpointRef,
     onArmTrack: (Int) -> Unit,
     onToggleMute: (Int) -> Unit,
+    onSetTrackOutput: (trackId: Int, endpoint: MidiEndpointRef, channel: Int) -> Unit,
+    onSetRecordInput: (MidiEndpointRef, Int?) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    var routingTrackId by remember { mutableStateOf<Int?>(null) }
+    var showRecordInput by remember { mutableStateOf(false) }
+    val routingTrack = part?.tracks?.firstOrNull { it.id == routingTrackId }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -40,20 +57,75 @@ fun SequencerScreen(
             style = MaterialTheme.typography.headlineMedium,
         )
         Text(
-            text = "${part?.lengthBeats ?: 0} beats · 8 tracks · realtime + modifiers",
+            text = "${part?.lengthBeats ?: 0} beats · loop",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Spacer(Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(10.dp))
+        RecordInputSummary(
+            label = recordInputLabel,
+            listenChannel = recordListenChannel,
+            onClick = { showRecordInput = true },
+        )
+        Spacer(modifier = Modifier.height(12.dp))
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             items(part?.tracks.orEmpty(), key = { it.id }) { track ->
                 TrackRow(
                     track = track,
                     onArm = { onArmTrack(track.id) },
                     onMute = { onToggleMute(track.id) },
+                    onOpenRouting = { routingTrackId = track.id },
                 )
             }
         }
+    }
+
+    if (routingTrack != null) {
+        TrackRoutingSheet(
+            track = routingTrack,
+            outputs = availableOutputs,
+            onDismiss = { routingTrackId = null },
+            onApply = { endpoint, channel ->
+                onSetTrackOutput(routingTrack.id, endpoint, channel)
+                routingTrackId = null
+            },
+        )
+    }
+
+    if (showRecordInput) {
+        RecordInputSheet(
+            current = recordInput,
+            listenChannel = recordListenChannel,
+            inputs = availableInputs,
+            onDismiss = { showRecordInput = false },
+            onApply = { endpoint, listen ->
+                onSetRecordInput(endpoint, listen)
+                showRecordInput = false
+            },
+        )
+    }
+}
+
+@Composable
+private fun RecordInputSummary(
+    label: String,
+    listenChannel: Int?,
+    onClick: () -> Unit,
+) {
+    val channelLabel = listenChannel?.let { "Ch $it" } ?: "Omni"
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(12.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+    ) {
+        Text("Record in", style = MaterialTheme.typography.labelLarge)
+        Text(
+            text = "$label · $channelLabel",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -62,42 +134,67 @@ private fun TrackRow(
     track: MidiTrack,
     onArm: () -> Unit,
     onMute: () -> Unit,
+    onOpenRouting: () -> Unit,
 ) {
     val shape = RoundedCornerShape(14.dp)
+    val routingSummary = buildString {
+        append(track.output.displayName.ifBlank { "No out" }.take(28))
+        append(" · Ch ")
+        append(track.outputChannel)
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.surface, shape)
             .then(
-                if (track.armed) {
-                    Modifier.border(2.dp, MaterialTheme.colorScheme.secondary, shape)
-                } else {
-                    Modifier
-                },
+                if (track.armed) Modifier.border(2.dp, MaterialTheme.colorScheme.secondary, shape)
+                else Modifier,
             )
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
-        Column(modifier = Modifier.clickable(onClick = onArm)) {
+        Column(modifier = Modifier.weight(1f)) {
             Text(track.name, style = MaterialTheme.typography.titleMedium)
             Text(
                 text = if (track.events.isEmpty()) "Empty" else "${track.events.size} events",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            Text(
+                text = routingSummary,
+                modifier = Modifier
+                    .clickable(onClick = onOpenRouting)
+                    .padding(top = 2.dp),
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+            )
         }
-        Text(
-            text = if (track.muted) "MUTE" else "ON",
-            modifier = Modifier
-                .clickable(onClick = onMute)
-                .background(
-                    if (track.muted) MaterialTheme.colorScheme.surfaceVariant
-                    else MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
-                    RoundedCornerShape(999.dp),
-                )
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            style = MaterialTheme.typography.labelLarge,
-        )
+        Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                text = if (track.armed) "ARMED" else "ARM",
+                modifier = Modifier
+                    .clickable(onClick = onArm)
+                    .background(
+                        if (track.armed) MaterialTheme.colorScheme.secondary.copy(alpha = 0.3f)
+                        else MaterialTheme.colorScheme.surfaceVariant,
+                        RoundedCornerShape(8.dp),
+                    )
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                style = MaterialTheme.typography.labelLarge,
+            )
+            Text(
+                text = if (track.muted) "MUTE" else "ON",
+                modifier = Modifier
+                    .clickable(onClick = onMute)
+                    .background(
+                        if (track.muted) MaterialTheme.colorScheme.surfaceVariant
+                        else MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
+                        RoundedCornerShape(8.dp),
+                    )
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                style = MaterialTheme.typography.labelLarge,
+            )
+        }
     }
 }

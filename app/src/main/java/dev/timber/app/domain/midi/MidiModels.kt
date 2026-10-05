@@ -2,8 +2,24 @@ package dev.timber.app.domain.midi
 
 import kotlinx.serialization.Serializable
 
-/** PPQN resolution for the timing engine (matches common hardware sequencers). */
 const val PPQN: Int = 96
+const val MIDI_DEVICE_UNSET: Int = -1
+
+@Serializable
+data class MidiEndpointRef(
+    val deviceId: Int = MIDI_DEVICE_UNSET,
+    val portIndex: Int = 0,
+    val displayName: String = "",
+) {
+    val isSet: Boolean get() = deviceId != MIDI_DEVICE_UNSET
+}
+
+/** [listenChannel] null = Omni. */
+@Serializable
+data class RecordInputConfig(
+    val endpoint: MidiEndpointRef = MidiEndpointRef(),
+    val listenChannel: Int? = null,
+)
 
 @Serializable
 enum class MidiMessageType {
@@ -20,7 +36,6 @@ enum class MidiMessageType {
 
 @Serializable
 data class MidiEvent(
-    /** Tick within the part at [PPQN] resolution. */
     val tick: Long,
     val type: MidiMessageType,
     val channel: Int,
@@ -64,18 +79,15 @@ enum class QuantizeGrid {
 @Serializable
 data class TrackModifiers(
     val quantize: QuantizeGrid = QuantizeGrid.Off,
-    /** 0f..1f swing amount applied when quantize is on. */
     val swing: Float = 0f,
-    /** Semitone transpose; use [PERFORMANCE_TRANSPOSE] for live key transpose. */
     val transpose: Int = 0,
-    /** 0f..2f velocity scale. */
     val velocityScale: Float = 1f,
     val filterNotes: Boolean = false,
     val filterCc: Boolean = false,
     val filterProgramChange: Boolean = false,
     val filterAftertouch: Boolean = false,
     val filterPitchBend: Boolean = false,
-    /** null = pass original channels; 1..16 forces output channel. */
+    /** null = track outputChannel; 1..16 forces channel. */
     val forceChannel: Int? = null,
 ) {
     companion object {
@@ -99,6 +111,8 @@ data class MidiTrack(
     val lengthTicks: Long? = null,
     val playMode: TrackPlayMode = TrackPlayMode.Loop,
     val armed: Boolean = false,
+    val output: MidiEndpointRef = MidiEndpointRef(),
+    val outputChannel: Int = 1,
 )
 
 @Serializable
@@ -108,9 +122,10 @@ data class Part(
     val lengthBeats: Int = 4,
     val timeSignatureNumerator: Int = 4,
     val timeSignatureDenominator: Int = 4,
-    /** null = use song/global tempo. */
     val tempoBpm: Float? = null,
-    val tracks: List<MidiTrack> = (1..8).map { MidiTrack(id = it) },
+    val tracks: List<MidiTrack> = (1..8).map {
+        MidiTrack(id = it, outputChannel = it.coerceIn(1, 16), armed = it == 1)
+    },
 ) {
     val lengthTicks: Long
         get() = lengthBeats.toLong() * PPQN
@@ -147,4 +162,5 @@ data class TransportSnapshot(
     val currentPartId: Int = 1,
     val loopPart: Boolean = true,
     val tempoBpm: Float = 120f,
+    val countInBeats: Int = 4,
 )
