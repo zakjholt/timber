@@ -117,22 +117,22 @@ jobs:
               echo "::error::Keystore/store password/alias invalid (keytool -list failed)."
               exit 1
             fi
-            # Unlock private key; if KEY_PASS fails, try STORE_PASS (common same-password keystores).
+            # JDK 9+ keytool often writes PKCS12 even for *.jks — don't force JKS.
+            unlock_key() {
+              local keypass="$1" dest="$2"
+              keytool -importkeystore -noprompt \
+                -srckeystore "$KEYSTORE_PATH" \
+                -srcalias "$KEY_ALIAS" -srcstorepass "$STORE_PASS" -srckeypass "$keypass" \
+                -destkeystore "$dest" -deststoretype PKCS12 \
+                -deststorepass tmp -destkeypass tmp >/dev/null 2>&1
+            }
             DEST="$(mktemp /tmp/timber-sign.XXXXXX.p12)"
             cleanup() { rm -f "$DEST"; }
             trap cleanup EXIT
             RESOLVED_KEY_PASS="$KEY_PASS"
-            if ! keytool -importkeystore -noprompt \
-                  -srckeystore "$KEYSTORE_PATH" -srcstoretype JKS \
-                  -srcalias "$KEY_ALIAS" -srcstorepass "$STORE_PASS" -srckeypass "$KEY_PASS" \
-                  -destkeystore "$DEST" -deststoretype PKCS12 \
-                  -deststorepass tmp -destkeypass tmp >/dev/null 2>&1; then
+            if ! unlock_key "$KEY_PASS" "$DEST"; then
               rm -f "$DEST"
-              if [[ "$KEY_PASS" != "$STORE_PASS" ]] && keytool -importkeystore -noprompt \
-                    -srckeystore "$KEYSTORE_PATH" -srcstoretype JKS \
-                    -srcalias "$KEY_ALIAS" -srcstorepass "$STORE_PASS" -srckeypass "$STORE_PASS" \
-                    -destkeystore "$DEST" -deststoretype PKCS12 \
-                    -deststorepass tmp -destkeypass tmp >/dev/null 2>&1; then
+              if [[ "$KEY_PASS" != "$STORE_PASS" ]] && unlock_key "$STORE_PASS" "$DEST"; then
                 echo "::warning::TIMBER_KEY_PASSWORD did not unlock the key; using TIMBER_KEYSTORE_PASSWORD as keypass."
                 RESOLVED_KEY_PASS="$STORE_PASS"
               else
