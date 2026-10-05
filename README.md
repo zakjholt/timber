@@ -1,48 +1,41 @@
 # Timber
 
-Phone-first Android **MIDI session brain** for a Yamaha MODX M (and other USB MIDI devices): RK-008 / Pyramid–class realtime record/loop with stage-safe portrait UX. Live mix/monitor is via an **external physical mixer** for now — in-app audio mixer/stems are deferred.
+Phone-first Android MIDI session brain for Yamaha MODX M (and other USB MIDI): realtime record/loop with stage-safe portrait UX. Live mix is an external physical mixer for now.
 
 ## Stack
 
 - Kotlin + Jetpack Compose (`dev.timber.app`)
-- `android.media.midi` for USB MIDI (any attached device; MODX primary)
+- `android.media.midi` for USB MIDI
 - Foreground service keeps the MIDI engine alive with the screen off
-- Native audio graph remains in the repo but is **not** on the near-term path
 
-## MODX M setup (required for thru)
+## MODX M setup
 
-1. Connect phone ↔ MODX M **USB TO HOST** with a USB-C OTG cable.
-2. On the MODX, set **Local Control = off** (Utility / MIDI settings). Timber keeps **MIDI thru always on** while ports are open; with Local Control on, keys double (local + thru’d notes).
-3. Prefer 44.1 kHz on both sides when you also care about USB audio channel maps later.
+1. Phone ↔ MODX **USB TO HOST** via USB-C OTG.
+2. Set **Local Control = off** on the MODX. Timber thru is always on while ports are open; Local Control on doubles notes.
+3. Prefer 44.1 kHz when you care about the full USB audio channel map later.
 
-### USB audio map (deferred / reference)
+### USB audio map (reference)
 
-At **44.1 kHz** the MODX M can expose **10 USB outs / 4 USB ins** (keyboard perspective). Timber’s in-app mixer/recorder is punted; use a physical mixer for monitor/mix until that phase returns.
+At **44.1 kHz**: **10 USB outs / 4 USB ins** from the keyboard’s view.
 
 | Host inputs (from MODX) | Role |
 |---|---|
-| 0–1 | Main L/R (includes system + master FX) |
-| 2–9 | Assignable USB 1–8 (parts without sys/master FX) |
+| 0–1 | Main L/R (system + master FX) |
+| 2–9 | Assignable USB 1–8 |
 
 | Host outputs (to MODX) | Role |
 |---|---|
-| 0–1 | Digital In L/R (route in MODX Performance → Audio In) |
+| 0–1 | Digital In L/R |
 | 2–3 | Extra return if the OS exposes 4 outs |
 
-## V1 MIDI scope (near-term)
+## V1 MIDI
 
-**Sequencer / session**
 - Song → Parts → 8 tracks
-- Realtime MIDI record / overdub **with count-in** into the armed track
-- Global record input (USB MIDI device/port) + listen channel **1–16 or Omni**
-- Per-track output **device + port + channel** (picker sheet)
-- Mute / arm; thru always on; panic (all notes/sound off) on stop
-- Non-destructive modifiers applied on playback/thru (transpose, velocity, filters, force channel; quantize/swing started)
-- Song arrangement + MIDI clock out (master) land in later slices
-
-**Not in this phase**
-- In-app mixer UI, AAudio duplex, Path B stem capture
-- MIDI clock slave/follow, song variations, step entry
+- Record/overdub with count-in into the armed track
+- Global record input (device/port) + listen channel 1–16 or Omni
+- Per-track output device + port + channel
+- Mute / arm; thru always on; panic on stop
+- Modifiers on playback/thru (transpose, velocity, filters, force channel)
 
 ## Project layout
 
@@ -51,9 +44,9 @@ app/src/main/java/dev/timber/app/
   domain/     MIDI, audio, session models
   device/     ModxMProfile
   engine/     MidiEngine, AudioEngine, foreground service
-  ui/         Sequencer, Transport, routing sheets (Mixer stub hidden)
+  ui/         Sequencer, Transport, routing sheets
 app/src/main/cpp/
-  audio/      AudioGraph (native stub — deferred)
+  audio/      AudioGraph (stub)
 ```
 
 ## Install (Obtainium)
@@ -75,15 +68,15 @@ Needs Android SDK 35, NDK, and a USB-host device for MODX testing.
 
 ## Manual test (Pixel 11 Pro + MODX)
 
-1. Install a debug APK; set MODX **Local Control off**.
-2. Plug OTG → confirm device name under the Timber title.
-3. Open **Record in** → pick MODX input + Omni (or a channel).
-4. Tap a track’s routing line → pick MODX out + channel (match the MODX Part).
-5. Arm a track → **Record** → wait for count-in → play keys → **Stop** (panic) or Record again to punch out to Play.
-6. **Play** — loop should emit to the track’s port/channel; mute should silence that track; screen-off should keep the session via the foreground notification.
+1. Install debug APK; MODX **Local Control off**.
+2. OTG → device name under Timber title.
+3. **Record in** → MODX input + Omni.
+4. Track routing line → MODX out + Part channel.
+5. Arm → **Record** → count-in → play → **Stop** or Record again to punch to Play.
+6. **Play**; mute; screen-off should keep the session notification.
 
-## Next implementation slices
+## Next
 
-1. Song arrangement (Parts chain) — Slice 2
+1. Song arrangement — Slice 2
 2. MIDI clock out (master), modifiers polish, persistence — Slice 3
-3. Deferred audio / Path B when monitor returns in-app
+3. In-app audio / Path B when needed

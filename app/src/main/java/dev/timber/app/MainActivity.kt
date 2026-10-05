@@ -14,18 +14,15 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import dev.timber.app.ui.mixer.MixerScreen
 import dev.timber.app.ui.sequencer.SequencerScreen
 import dev.timber.app.ui.session.SessionViewModel
-import dev.timber.app.ui.session.TimberTab
+import dev.timber.app.ui.session.TimberUiState
 import dev.timber.app.ui.theme.TimberTheme
 import dev.timber.app.ui.transport.TransportBar
 
@@ -38,10 +35,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             TimberTheme {
                 val state by viewModel.ui.collectAsStateWithLifecycle()
-                TimberAppScaffold(
-                    state = state,
-                    viewModel = viewModel,
-                )
+                TimberAppScaffold(state = state, viewModel = viewModel)
             }
         }
     }
@@ -49,9 +43,16 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun TimberAppScaffold(
-    state: dev.timber.app.ui.session.TimberUiState,
+    state: TimberUiState,
     viewModel: SessionViewModel,
 ) {
+    val part = state.session.song.parts.firstOrNull {
+        it.id == state.session.transport.currentPartId
+    } ?: state.session.song.parts.firstOrNull()
+    val recordLabel = state.recordInput.displayName.ifBlank {
+        state.availableInputs.firstOrNull()?.label ?: "No MIDI in"
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -87,62 +88,21 @@ private fun TimberAppScaffold(
         )
         Spacer(modifier = Modifier.height(12.dp))
         Box(modifier = Modifier.weight(1f)) {
-            when (state.tab) {
-                TimberTab.Sequencer -> {
-                    val recordLabel = state.recordInput.displayName.ifBlank {
-                        state.availableInputs.firstOrNull()?.label ?: "No MIDI in"
-                    }
-                    SequencerScreen(
-                        part = state.session.song.parts.firstOrNull {
-                            it.id == state.session.transport.currentPartId
-                        } ?: state.session.song.parts.firstOrNull(),
-                        recordInputLabel = recordLabel,
-                        recordListenChannel = state.recordListenChannel,
-                        availableInputs = state.availableInputs,
-                        availableOutputs = state.availableOutputs,
-                        recordInput = state.recordInput,
-                        onArmTrack = viewModel::armMidiTrack,
-                        onToggleMute = viewModel::toggleMidiMute,
-                        onSetTrackOutput = viewModel::setTrackOutput,
-                        onSetRecordInput = { endpoint, listen ->
-                            viewModel.setRecordInput(endpoint)
-                            viewModel.setRecordListenChannel(listen)
-                        },
-                    )
-                }
-                TimberTab.Mixer -> MixerScreen(
-                    mixer = state.session.mixer,
-                    meters = state.meters,
-                    masterMeter = state.masterMeter,
-                    audioRunning = state.audioRunning,
-                    audioRecording = state.audioRecording,
-                    deviceNotes = state.deviceNotes,
-                    onToggleEngine = viewModel::toggleAudioEngine,
-                    onToggleRecord = viewModel::toggleAudioRecord,
-                    onGain = viewModel::setChannelGain,
-                    onMute = viewModel::toggleChannelMute,
-                    onSolo = viewModel::toggleChannelSolo,
-                    onArmStem = viewModel::toggleStemArm,
-                    onArmMaster = viewModel::toggleMasterArm,
-                    onMasterLevel = viewModel::setMasterLevel,
-                )
-            }
-        }
-        if (state.showMixerTab) {
-            NavigationBar {
-                NavigationBarItem(
-                    selected = state.tab == TimberTab.Sequencer,
-                    onClick = { viewModel.selectTab(TimberTab.Sequencer) },
-                    icon = { Text("SEQ") },
-                    label = { Text("Sequencer") },
-                )
-                NavigationBarItem(
-                    selected = state.tab == TimberTab.Mixer,
-                    onClick = { viewModel.selectTab(TimberTab.Mixer) },
-                    icon = { Text("MIX") },
-                    label = { Text("Mixer") },
-                )
-            }
+            SequencerScreen(
+                part = part,
+                recordInputLabel = recordLabel,
+                recordListenChannel = state.recordListenChannel,
+                availableInputs = state.availableInputs,
+                availableOutputs = state.availableOutputs,
+                recordInput = state.recordInput,
+                onArmTrack = viewModel::armMidiTrack,
+                onToggleMute = viewModel::toggleMidiMute,
+                onSetTrackOutput = viewModel::setTrackOutput,
+                onSetRecordInput = { endpoint, listen ->
+                    viewModel.setRecordInput(endpoint)
+                    viewModel.setRecordListenChannel(listen)
+                },
+            )
         }
     }
 }

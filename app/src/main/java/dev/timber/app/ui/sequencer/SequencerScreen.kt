@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -58,7 +57,7 @@ fun SequencerScreen(
             style = MaterialTheme.typography.headlineMedium,
         )
         Text(
-            text = "${part?.lengthBeats ?: 0} beats · loop · thru always on",
+            text = "${part?.lengthBeats ?: 0} beats · loop",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -139,8 +138,7 @@ private fun TrackRow(
 ) {
     val shape = RoundedCornerShape(14.dp)
     val routingSummary = buildString {
-        val name = track.output.displayName.ifBlank { "No out" }
-        append(name.take(28))
+        append(track.output.displayName.ifBlank { "No out" }.take(28))
         append(" · Ch ")
         append(track.outputChannel)
     }
@@ -149,34 +147,15 @@ private fun TrackRow(
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.surface, shape)
             .then(
-                if (track.armed) {
-                    Modifier.border(2.dp, MaterialTheme.colorScheme.secondary, shape)
-                } else {
-                    Modifier
-                },
+                if (track.armed) Modifier.border(2.dp, MaterialTheme.colorScheme.secondary, shape)
+                else Modifier,
             )
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Column(modifier = Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(track.name, style = MaterialTheme.typography.titleMedium)
-                if (track.armed) {
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "ARM",
-                        modifier = Modifier
-                            .background(
-                                MaterialTheme.colorScheme.secondary.copy(alpha = 0.25f),
-                                RoundedCornerShape(6.dp),
-                            )
-                            .padding(horizontal = 8.dp, vertical = 2.dp),
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.secondary,
-                    )
-                }
-            }
+            Text(track.name, style = MaterialTheme.typography.titleMedium)
             Text(
                 text = if (track.events.isEmpty()) "Empty" else "${track.events.size} events",
                 style = MaterialTheme.typography.bodyMedium,

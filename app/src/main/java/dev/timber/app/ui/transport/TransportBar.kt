@@ -60,56 +60,48 @@ fun TransportBar(
         label = "transportStatus",
     )
 
-    Column(
+    Row(
         modifier = modifier
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(18.dp))
             .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Column(modifier = Modifier.scale(pulseScale)) {
-                Text(
-                    text = String.format("%03d:%02d  %.1f", beat, tickInBeat, tempoBpm),
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-                Text(
-                    text = when {
-                        isCountIn -> "COUNT IN · $countInBeatsRemaining"
-                        isRecording -> "RECORDING"
-                        transport == TransportState.Playing -> "PLAYING"
-                        else -> "STOPPED"
-                    },
-                    style = MaterialTheme.typography.labelLarge,
-                    color = statusColor,
-                )
+        Column(modifier = Modifier.scale(pulseScale)) {
+            Text(
+                text = String.format("%03d:%02d  %.1f", beat, tickInBeat, tempoBpm),
+                style = MaterialTheme.typography.titleMedium,
+            )
+            Text(
+                text = when {
+                    isCountIn -> "COUNT IN · $countInBeatsRemaining"
+                    isRecording -> "RECORDING"
+                    transport == TransportState.Playing -> "PLAYING"
+                    else -> "STOPPED"
+                },
+                style = MaterialTheme.typography.labelLarge,
+                color = statusColor,
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            FilledIconButton(onClick = onStop) {
+                Icon(Icons.Default.Stop, contentDescription = "Stop")
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                FilledIconButton(
-                    onClick = onStop,
-                    modifier = Modifier.padding(0.dp),
-                ) {
-                    Icon(Icons.Default.Stop, contentDescription = "Stop")
-                }
-                FilledIconButton(onClick = onPlay) {
-                    Icon(Icons.Default.PlayArrow, contentDescription = "Play")
-                }
-                FilledIconButton(
-                    onClick = onToggleRecord,
-                    colors = IconButtonDefaults.filledIconButtonColors(
-                        containerColor = when {
-                            isRecording -> MaterialTheme.colorScheme.secondary
-                            isCountIn -> MaterialTheme.colorScheme.primary
-                            else -> MaterialTheme.colorScheme.surfaceVariant
-                        },
-                    ),
-                ) {
-                    Icon(Icons.Default.FiberManualRecord, contentDescription = "Record MIDI")
-                }
+            FilledIconButton(onClick = onPlay) {
+                Icon(Icons.Default.PlayArrow, contentDescription = "Play")
+            }
+            FilledIconButton(
+                onClick = onToggleRecord,
+                colors = IconButtonDefaults.filledIconButtonColors(
+                    containerColor = when {
+                        isRecording -> MaterialTheme.colorScheme.secondary
+                        isCountIn -> MaterialTheme.colorScheme.primary
+                        else -> MaterialTheme.colorScheme.surfaceVariant
+                    },
+                ),
+            ) {
+                Icon(Icons.Default.FiberManualRecord, contentDescription = "Record MIDI")
             }
         }
     }

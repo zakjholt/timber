@@ -53,8 +53,6 @@ data class TimberUiState(
     val deviceNotes: String = SessionState.bootstrap().deviceNotes,
     val meters: List<MeterPeak> = emptyList(),
     val masterMeter: MeterPeak = MeterPeak(channelId = -1),
-    /** Mixer tab kept in code but hidden while audio is deferred. */
-    val showMixerTab: Boolean = false,
 )
 
 class SessionViewModel(application: Application) : AndroidViewModel(application) {
@@ -70,13 +68,8 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     private var engineServiceRunning = false
 
     private val deviceCallback = object : AudioDeviceCallback() {
-        override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
-            renegotiateAudio()
-        }
-
-        override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
-            renegotiateAudio()
-        }
+        override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) = renegotiateAudio()
+        override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) = renegotiateAudio()
     }
 
     init {
@@ -135,26 +128,17 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun selectTab(tab: TimberTab) {
-        if (tab == TimberTab.Mixer && !_ui.value.showMixerTab) return
-        _ui.update { it.copy(tab = tab) }
-    }
-
     fun play() = midiEngine.play()
 
     fun stop() {
         midiEngine.stop()
-        if (audioEngine.state.value.isRecording) {
-            audioEngine.stopRecording()
-        }
+        if (audioEngine.state.value.isRecording) audioEngine.stopRecording()
         stopEngineService()
     }
 
     fun toggleMidiRecord() = midiEngine.toggleRecord()
-
     fun armMidiTrack(trackId: Int) = midiEngine.armTrack(trackId)
     fun toggleMidiMute(trackId: Int) = midiEngine.toggleMute(trackId)
-
     fun setRecordInput(endpoint: MidiEndpointRef) = midiEngine.setRecordInput(endpoint)
     fun setRecordListenChannel(channel: Int?) = midiEngine.setRecordListenChannel(channel)
     fun setTrackOutput(trackId: Int, endpoint: MidiEndpointRef, channel: Int) =
@@ -168,11 +152,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     fun setMasterLevel(levelDb: Float) = audioEngine.setMasterLevel(levelDb)
 
     fun toggleAudioEngine() {
-        if (audioEngine.state.value.isRunning) {
-            audioEngine.stop()
-        } else {
-            audioEngine.start()
-        }
+        if (audioEngine.state.value.isRunning) audioEngine.stop() else audioEngine.start()
     }
 
     fun toggleAudioRecord() {
@@ -180,9 +160,7 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
             audioEngine.stopRecording()
             return
         }
-        if (!audioEngine.state.value.isRunning) {
-            audioEngine.start()
-        }
+        if (!audioEngine.state.value.isRunning) audioEngine.start()
         val takesDir = File(getApplication<Application>().filesDir, "takes")
         takesDir.mkdirs()
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
@@ -192,22 +170,21 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun syncEngineService(transport: TransportState) {
-        val shouldRun = transport != TransportState.Stopped
-        if (shouldRun) startEngineService() else stopEngineService()
+        if (transport != TransportState.Stopped) startEngineService() else stopEngineService()
     }
 
     private fun startEngineService() {
         if (engineServiceRunning) return
-        val app = getApplication<Application>()
-        val intent = Intent(app, TimberEngineService::class.java)
-        ContextCompat.startForegroundService(app, intent)
+        ContextCompat.startForegroundService(
+            getApplication(),
+            Intent(getApplication(), TimberEngineService::class.java),
+        )
         engineServiceRunning = true
     }
 
     private fun stopEngineService() {
         if (!engineServiceRunning) return
-        val app = getApplication<Application>()
-        app.stopService(Intent(app, TimberEngineService::class.java))
+        getApplication<Application>().stopService(Intent(getApplication(), TimberEngineService::class.java))
         engineServiceRunning = false
     }
 

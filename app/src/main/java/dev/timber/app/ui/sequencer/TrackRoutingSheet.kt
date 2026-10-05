@@ -45,10 +45,7 @@ fun TrackRoutingSheet(
         )
     }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-    ) {
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -56,32 +53,26 @@ fun TrackRoutingSheet(
                 .verticalScroll(rememberScrollState()),
         ) {
             Text(track.name, style = MaterialTheme.typography.headlineMedium)
-            Text(
-                "Output device · port · channel",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
             Spacer(modifier = Modifier.height(16.dp))
 
-            Text("Device / port", style = MaterialTheme.typography.titleMedium)
+            Text("Output", style = MaterialTheme.typography.titleMedium)
             Spacer(modifier = Modifier.height(8.dp))
             if (outputs.isEmpty()) {
                 Text(
-                    "No USB MIDI outputs yet. Connect a device (MODX expected).",
+                    "No USB MIDI outputs.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             } else {
                 outputs.forEachIndexed { index, port ->
-                    val selected = index == selectedKey
                     Text(
-                        text = port.label + if (port.isModxFamily) "  · MODX" else "",
+                        text = port.label + if (port.isModxFamily) " · MODX" else "",
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { selectedKey = index }
                             .padding(vertical = 10.dp),
                         style = MaterialTheme.typography.bodyLarge,
-                        color = if (selected) {
+                        color = if (index == selectedKey) {
                             MaterialTheme.colorScheme.primary
                         } else {
                             MaterialTheme.colorScheme.onSurface
@@ -93,27 +84,20 @@ fun TrackRoutingSheet(
             Spacer(modifier = Modifier.height(16.dp))
             Text("Channel", style = MaterialTheme.typography.titleMedium)
             Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                (1..16).chunked(8).forEach { rowChannels ->
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        rowChannels.forEach { ch ->
-                            Text(
-                                text = ch.toString(),
-                                modifier = Modifier
-                                    .clickable { channel = ch }
-                                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                                style = MaterialTheme.typography.labelLarge,
-                                color = if (ch == channel) {
-                                    MaterialTheme.colorScheme.secondary
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                },
-                            )
-                        }
-                    }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                (1..16).forEach { ch ->
+                    Text(
+                        text = ch.toString(),
+                        modifier = Modifier
+                            .clickable { channel = ch }
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                        style = MaterialTheme.typography.labelLarge,
+                        color = if (ch == channel) {
+                            MaterialTheme.colorScheme.secondary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
                 }
             }
 
@@ -125,9 +109,7 @@ fun TrackRoutingSheet(
                 TextButton(onClick = onDismiss) { Text("Cancel") }
                 TextButton(
                     onClick = {
-                        val port = outputs.getOrNull(selectedKey)
-                        val endpoint = port?.toRef() ?: track.output
-                        onApply(endpoint, channel)
+                        onApply(outputs.getOrNull(selectedKey)?.toRef() ?: track.output, channel)
                     },
                 ) { Text("Apply") }
             }
@@ -153,15 +135,9 @@ fun RecordInputSheet(
             }.coerceAtLeast(0),
         )
     }
-    // 0 = Omni, 1..16 = channel
-    var channelChoice by remember(listenChannel) {
-        mutableIntStateOf(listenChannel ?: 0)
-    }
+    var channelChoice by remember(listenChannel) { mutableIntStateOf(listenChannel ?: 0) }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-    ) {
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -169,32 +145,26 @@ fun RecordInputSheet(
                 .verticalScroll(rememberScrollState()),
         ) {
             Text("Record input", style = MaterialTheme.typography.headlineMedium)
-            Text(
-                "Global USB MIDI in + listen channel",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
             Spacer(modifier = Modifier.height(16.dp))
 
-            Text("Input device / port", style = MaterialTheme.typography.titleMedium)
+            Text("Input", style = MaterialTheme.typography.titleMedium)
             Spacer(modifier = Modifier.height(8.dp))
             if (inputs.isEmpty()) {
                 Text(
-                    "No USB MIDI inputs yet.",
+                    "No USB MIDI inputs.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             } else {
                 inputs.forEachIndexed { index, port ->
-                    val selected = index == selectedKey
                     Text(
-                        text = port.label + if (port.isModxFamily) "  · MODX" else "",
+                        text = port.label + if (port.isModxFamily) " · MODX" else "",
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { selectedKey = index }
                             .padding(vertical = 10.dp),
                         style = MaterialTheme.typography.bodyLarge,
-                        color = if (selected) {
+                        color = if (index == selectedKey) {
                             MaterialTheme.colorScheme.primary
                         } else {
                             MaterialTheme.colorScheme.onSurface
@@ -218,7 +188,7 @@ fun RecordInputSheet(
                     MaterialTheme.colorScheme.onSurface
                 },
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 (1..16).forEach { ch ->
                     Text(
                         text = ch.toString(),
@@ -243,10 +213,10 @@ fun RecordInputSheet(
                 TextButton(onClick = onDismiss) { Text("Cancel") }
                 TextButton(
                     onClick = {
-                        val port = inputs.getOrNull(selectedKey)
-                        val endpoint = port?.toRef() ?: current
-                        val listen = channelChoice.takeIf { it in 1..16 }
-                        onApply(endpoint, listen)
+                        onApply(
+                            inputs.getOrNull(selectedKey)?.toRef() ?: current,
+                            channelChoice.takeIf { it in 1..16 },
+                        )
                     },
                 ) { Text("Apply") }
             }

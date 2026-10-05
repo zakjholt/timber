@@ -6,25 +6,16 @@ import dev.timber.app.domain.midi.PPQN
 import dev.timber.app.domain.midi.QuantizeGrid
 import dev.timber.app.domain.midi.TrackModifiers
 
-/**
- * Pure MIDI transform helpers used by [MidiEngine] on the clock / thru paths.
- */
 object MidiPlayback {
-    fun shouldEmit(event: MidiEvent, modifiers: TrackModifiers): Boolean {
-        return when (event.type) {
-            MidiMessageType.NoteOn, MidiMessageType.NoteOff -> !modifiers.filterNotes
-            MidiMessageType.ControlChange -> !modifiers.filterCc
-            MidiMessageType.ProgramChange -> !modifiers.filterProgramChange
-            MidiMessageType.Aftertouch, MidiMessageType.ChannelPressure -> !modifiers.filterAftertouch
-            MidiMessageType.PitchBend -> !modifiers.filterPitchBend
-            MidiMessageType.SysEx, MidiMessageType.Other -> true
-        }
+    fun shouldEmit(event: MidiEvent, modifiers: TrackModifiers): Boolean = when (event.type) {
+        MidiMessageType.NoteOn, MidiMessageType.NoteOff -> !modifiers.filterNotes
+        MidiMessageType.ControlChange -> !modifiers.filterCc
+        MidiMessageType.ProgramChange -> !modifiers.filterProgramChange
+        MidiMessageType.Aftertouch, MidiMessageType.ChannelPressure -> !modifiers.filterAftertouch
+        MidiMessageType.PitchBend -> !modifiers.filterPitchBend
+        MidiMessageType.SysEx, MidiMessageType.Other -> true
     }
 
-    /**
-     * Apply non-destructive modifiers for playback / thru.
-     * [trackChannel] is the track's base output channel (1–16); [forceChannel] wins when set.
-     */
     fun applyModifiers(
         event: MidiEvent,
         modifiers: TrackModifiers,
@@ -51,7 +42,6 @@ object MidiPlayback {
         return event.copy(channel = channel, data1 = data1, data2 = data2)
     }
 
-    /** Quantize a tick; swing nudges off-beats when grid is active. */
     fun quantizeTick(tick: Long, modifiers: TrackModifiers): Long {
         val gridTicks = gridToTicks(modifiers.quantize) ?: return tick
         if (gridTicks <= 0) return tick

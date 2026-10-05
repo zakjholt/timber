@@ -9,17 +9,13 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import dev.timber.app.R
 
-/**
- * Keeps the MIDI session engine eligible to run while the screen is off.
- * Started/stopped from [dev.timber.app.ui.session.SessionViewModel] with transport.
- */
+/** Foreground service so MIDI keeps running with the screen off. */
 class TimberEngineService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val channelId = "timber_engine"
-        val manager = getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(
+        getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(channelId, "Timber Engine", NotificationManager.IMPORTANCE_LOW),
         )
         val notification: Notification = NotificationCompat.Builder(this, channelId)
