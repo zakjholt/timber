@@ -56,22 +56,28 @@ app/src/main/cpp/
   audio/      AudioGraph (native stub → full duplex + WAV writers)
 ```
 
-## Build
+## Install (Obtainium)
 
-Open in Android Studio (or use the Gradle wrapper once the Android SDK/NDK are installed):
+1. Install [Obtainium](https://github.com/ImranR98/Obtainium).
+2. Add App → GitHub → `https://github.com/zakjholt/timber`
+3. APK filter: `timber-.*-release\.apk` · Include prereleases: off
+4. Install / update from GitHub Releases (`timber-<version>-release.apk`, tags `v0.1.0`).
+
+Publishing a release (keystore secrets, first tag): [docs/RELEASE.md](docs/RELEASE.md).
+
+## Build
 
 ```bash
 export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
 ./gradlew :app:assembleDebug
 ```
 
-Required on the machine: Android SDK 35, NDK (for `libtimber_audio`), and a device/emulator with USB host for MODX testing.
+Needs Android SDK 35, NDK, and a USB-host device/emulator for MODX testing.
 
 ## Next implementation slices
 
-1. Wire Oboe/AAudio duplex callbacks + real meters
-2. Non-blocking WAV writers for armed stems + master + `take.json` manifest
-3. MIDI output port open/send + event playback on the clock thread
-4. Part length / quantize / swing sheets
-5. Song arrangement mode
-6. First insert FX (EQ) behind the existing chain slots
+1. MIDI I/O + Part looper + per-track device/port/channel routing (Slice 1)
+2. Song arrangement playback + editor (Slice 2)
+3. Sequencer depth + persistence + stage UX harden (Slice 3)
+4. MIDI clock master/slave — V1.x (Slice 4)
+5. In-app audio / Path B stems — deferred (external mixer for now)
