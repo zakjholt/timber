@@ -40,6 +40,6 @@ object UsbAudioProbe {
     }
 
     private fun maxChannels(device: AudioDeviceInfo): Int {
-        return device.channelCounts.maxOrNull() ?: device.channelCount
+        return device.channelCounts.maxOrNull() ?: 2
     }
 }
