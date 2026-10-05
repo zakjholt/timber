@@ -64,7 +64,11 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - uses: android-actions/setup-android@v3
+      # v3 defaults include obsolete `tools` (fails: Failed to find package 'tools').
+      # v4 installs cmdline-tools + platform-tools only; remaining packages via sdkmanager below.
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
 
       - name: Install SDK packages
         shell: bash
