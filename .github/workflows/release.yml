@@ -113,30 +113,71 @@ jobs:
             mkdir -p signing
             KEYSTORE_PATH="$GITHUB_WORKSPACE/signing/timber-upload.jks"
             printf '%s' "$TIMBER_KEYSTORE_BASE64" | tr -d '[:space:]' | base64 -d > "$KEYSTORE_PATH"
-            if ! keytool -list -keystore "$KEYSTORE_PATH" -storepass "$STORE_PASS" -alias "$KEY_ALIAS" >/dev/null 2>&1; then
+            LIST_OUT="$(keytool -list -keystore "$KEYSTORE_PATH" -storepass "$STORE_PASS" -alias "$KEY_ALIAS" 2>&1)" || {
               echo "::error::Keystore/store password/alias invalid (keytool -list failed)."
               exit 1
-            fi
-            # JDK 9+ keytool often writes PKCS12 even for *.jks — don't force JKS.
-            unlock_key() {
-              local keypass="$1" dest="$2"
-              keytool -importkeystore -noprompt \
-                -srckeystore "$KEYSTORE_PATH" \
-                -srcalias "$KEY_ALIAS" -srcstorepass "$STORE_PASS" -srckeypass "$keypass" \
-                -destkeystore "$dest" -deststoretype PKCS12 \
-                -deststorepass tmp -destkeypass tmp >/dev/null 2>&1
             }
-            DEST="$(mktemp /tmp/timber-sign.XXXXXX.p12)"
+            KS_TYPE="$(printf '%s\n' "$LIST_OUT" | awk -F': ' '/Keystore type/ {print $2; exit}' | tr -d '[:space:]')"
+            echo "Keystore type: ${KS_TYPE:-unknown}"
+            # dest passwords must be >= 6 chars (keytool rejects shorter).
+            unlock_key() {
+              local keypass="$1" dest="$2" storetype="${3:-}"
+              local err args=(
+                -importkeystore -noprompt
+                -srckeystore "$KEYSTORE_PATH"
+                -srcalias "$KEY_ALIAS"
+                -srcstorepass "$STORE_PASS"
+                -srckeypass "$keypass"
+                -destkeystore "$dest"
+                -deststoretype PKCS12
+                -deststorepass tmppass
+                -destkeypass tmppass
+              )
+              err="$(mktemp)"
+              if [[ -n "$storetype" ]]; then
+                args+=(-srcstoretype "$storetype")
+              fi
+              if keytool "${args[@]}" >/dev/null 2>"$err"; then
+                rm -f "$err"
+                return 0
+              fi
+              if grep -qiE 'password|pad|recover|alias|integrity|not exist|exception|at least' "$err"; then
+                echo "::notice::keytool unlock hint: $(tr '\n' ' ' <"$err" | sed -E 's/[^[:print:]]//g' | head -c 240)"
+              fi
+              rm -f "$err"
+              return 1
+            }
+            DEST="$(mktemp /tmp/timber-sign.XXXXXX).p12"
             cleanup() { rm -f "$DEST"; }
             trap cleanup EXIT
-            RESOLVED_KEY_PASS="$KEY_PASS"
-            if ! unlock_key "$KEY_PASS" "$DEST"; then
+            # PKCS12 cannot store a distinct key password (JDK ignores -keypass on create).
+            # Using TIMBER_KEY_PASSWORD there would unlock via ignored -srckeypass but break apksigner.
+            if [[ "${KS_TYPE^^}" == "PKCS12" ]]; then
               rm -f "$DEST"
-              if [[ "$KEY_PASS" != "$STORE_PASS" ]] && unlock_key "$STORE_PASS" "$DEST"; then
-                echo "::warning::TIMBER_KEY_PASSWORD did not unlock the key; using TIMBER_KEYSTORE_PASSWORD as keypass."
-                RESOLVED_KEY_PASS="$STORE_PASS"
-              else
-                echo "::error::TIMBER_KEY_PASSWORD does not unlock the key alias (store-password fallback also failed)."
+              if ! unlock_key "$STORE_PASS" "$DEST"; then
+                echo "::error::Could not unlock PKCS12 key with TIMBER_KEYSTORE_PASSWORD."
+                exit 1
+              fi
+              RESOLVED_KEY_PASS="$STORE_PASS"
+              if [[ "$KEY_PASS" != "$STORE_PASS" ]]; then
+                echo "::warning::PKCS12 keystore: using TIMBER_KEYSTORE_PASSWORD as keypass (distinct TIMBER_KEY_PASSWORD is not used by PKCS12)."
+              fi
+            else
+              RESOLVED_KEY_PASS=""
+              for pass in "$KEY_PASS" "$STORE_PASS"; do
+                for st in "" JKS PKCS12; do
+                  rm -f "$DEST"
+                  if unlock_key "$pass" "$DEST" "$st"; then
+                    RESOLVED_KEY_PASS="$pass"
+                    if [[ "$pass" != "$KEY_PASS" ]]; then
+                      echo "::warning::TIMBER_KEY_PASSWORD did not unlock the key; using TIMBER_KEYSTORE_PASSWORD as keypass."
+                    fi
+                    break 2
+                  fi
+                done
+              done
+              if [[ -z "$RESOLVED_KEY_PASS" ]]; then
+                echo "::error::Could not unlock key alias with TIMBER_KEY_PASSWORD or TIMBER_KEYSTORE_PASSWORD. Update Secrets to match the keystore (see docs/RELEASE.md)."
                 exit 1
               fi
             fi
