@@ -1,6 +1,7 @@
 package dev.timber.app.engine.midi
 
 import android.content.SharedPreferences
+import android.hardware.usb.UsbDevice
 import android.media.midi.MidiDevice
 import android.media.midi.MidiDeviceInfo
 import android.media.midi.MidiInputPort
@@ -30,6 +31,7 @@ import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 
 /**
@@ -92,9 +94,12 @@ class MidiEngine(
     private val countInTicksLeft = AtomicLong(0)
     private val countInPulseCounter = AtomicInteger(0)
     private var clockThread: Thread? = null
+    /** Receive-path transport; kept in sync so binder-thread IN logs/record see the latest mode. */
+    private val liveTransport = AtomicReference(TransportState.Stopped)
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val mainExecutor = Executor { mainHandler.post(it) }
+    private var pendingExclusiveOpen: Runnable? = null
 
     private val openDevices = ConcurrentHashMap<Int, MidiDevice>()
     private val pendingOpenDeviceIds = ConcurrentHashMap.newKeySet<Int>()
@@ -214,7 +219,7 @@ class MidiEngine(
         for (family in families) {
             val wantUmp = resolveWantUmp(family)
             familyWantUmp[family] = wantUmp
-            enforceExclusiveFamilyOpen(family, wantUmp)
+            enforceExclusiveFamilyOpen(family, wantUmp, openDelayMs = EXCLUSIVE_SWITCH_DELAY_MS)
         }
 
         // Drop stale open devices that disappeared from both transports.
@@ -292,9 +297,15 @@ class MidiEngine(
         )
         if (listed != null) {
             familyWantUmp[listed.familyKey] = listed.isUmp
-            enforceExclusiveFamilyOpen(listed.familyKey, wantUmp = listed.isUmp)
+            // Close opposite alt-setting first, then delayed open — USB needs settle time.
+            enforceExclusiveFamilyOpen(
+                familyKey = listed.familyKey,
+                wantUmp = listed.isUmp,
+                openDelayMs = EXCLUSIVE_SWITCH_DELAY_MS,
+            )
+        } else {
+            reconnectInputReceivers()
         }
-        reconnectInputReceivers()
     }
 
     /** null = Omni */
@@ -313,13 +324,13 @@ class MidiEngine(
 
     fun play() {
         if (running.getAndSet(true)) {
-            if (_state.value.transport == TransportState.Stopped) {
-                _state.update { it.copy(transport = TransportState.Playing) }
+            if (liveTransport.get() == TransportState.Stopped) {
+                setTransport(TransportState.Playing)
                 MidiDebugLog.i("transport=Playing (resume)")
             }
             return
         }
-        _state.update { it.copy(transport = TransportState.Playing, countInBeatsRemaining = 0) }
+        setTransport(TransportState.Playing, clearCountIn = true)
         MidiDebugLog.i("transport=Playing")
         startClock()
     }
@@ -331,23 +342,21 @@ class MidiEngine(
         positionTicks.set(0)
         countInTicksLeft.set(0)
         recordBuffer.clear()
-        _state.update {
-            it.copy(transport = TransportState.Stopped, positionTicks = 0, countInBeatsRemaining = 0)
-        }
+        setTransport(TransportState.Stopped, resetPosition = true, clearCountIn = true)
         MidiDebugLog.i("transport=Stopped")
         sendPanic()
     }
 
     fun toggleRecord() {
-        when (_state.value.transport) {
+        when (liveTransport.get()) {
             TransportState.Recording -> {
                 commitRecording()
-                _state.update { it.copy(transport = TransportState.Playing, countInBeatsRemaining = 0) }
-                MidiDebugLog.i("transport=Playing (punch out) recordedEvents committed")
+                setTransport(TransportState.Playing, clearCountIn = true)
+                MidiDebugLog.i("transport=Playing (punch out) recordedBufWasCommitted")
             }
             TransportState.CountIn -> {
                 countInTicksLeft.set(0)
-                _state.update { it.copy(transport = TransportState.Playing, countInBeatsRemaining = 0) }
+                setTransport(TransportState.Playing, clearCountIn = true)
                 MidiDebugLog.i("transport=Playing (count-in cancelled)")
             }
             TransportState.Playing, TransportState.Stopped -> {
@@ -356,7 +365,7 @@ class MidiEngine(
                     ?: (activePart()?.timeSignatureNumerator ?: 4)
                 if (beats <= 0) {
                     if (!running.get()) play()
-                    _state.update { it.copy(transport = TransportState.Recording, countInBeatsRemaining = 0) }
+                    setTransport(TransportState.Recording, clearCountIn = true)
                     MidiDebugLog.i("transport=Recording (no count-in)")
                     return
                 }
@@ -370,6 +379,7 @@ class MidiEngine(
                         countInBeats = beats,
                     )
                 }
+                liveTransport.set(TransportState.CountIn)
                 MidiDebugLog.i("transport=CountIn beats=$beats")
                 if (!running.get()) {
                     running.set(true)
@@ -393,7 +403,11 @@ class MidiEngine(
             (deviceIdFromKey != null && umpDeviceIds.contains(deviceIdFromKey))
 
         if (count <= 0) {
-            MidiDebugLog.i("IN empty count=$count port=$portKey ump=$isUmpPort tNs=$timestampNs selectedIn=$isSelectedRecordPort")
+            if (isSelectedRecordPort) {
+                MidiDebugLog.i(
+                    "IN empty count=$count port=$portKey ump=$isUmpPort tNs=$timestampNs selectedIn=true",
+                )
+            }
             return
         }
 
@@ -456,20 +470,25 @@ class MidiEngine(
     ) {
         val decoded = UmpCodec.decodePackets(data, 0, data.size)
         if (decoded.isEmpty()) {
-            MidiDebugLog.i(
-                "IN UMP undecoded port=$portKey bytes=[${MidiDebugFormat.formatBytes(data, 0, data.size)}] " +
-                    "tNs=$timestampNs selectedIn=$isSelectedRecordPort",
-            )
+            if (isSelectedRecordPort) {
+                MidiDebugLog.i(
+                    "IN UMP undecoded port=$portKey bytes=[${MidiDebugFormat.formatBytes(data, 0, data.size)}] " +
+                        "tNs=$timestampNs selectedIn=true",
+                )
+            }
             return
         }
         for (packet in decoded) {
-            // Utility JR clock etc. — log throttled like MIDI 1 clock.
-            if (packet.messageType == UmpCodec.MT_UTILITY) {
-                logThrottled(
-                    portKey,
-                    "IN UMP Utility port=$portKey bytes=[${MidiDebugFormat.formatBytes(data, 0, minOf(4, data.size))}] " +
-                        "tNs=$timestampNs selectedIn=$isSelectedRecordPort",
-                )
+            if (packet.messageType == UmpCodec.MT_UTILITY) continue
+            // Active Sensing / clutter — never Info-log.
+            if (packet.messageType == UmpCodec.MT_SYSTEM && packet.data1 == 0xFE) continue
+            if (packet.messageType == UmpCodec.MT_SYSTEM) {
+                if (isSelectedRecordPort) {
+                    MidiDebugLog.i(
+                        "IN ${packet.label} port=$portKey tNs=$timestampNs selectedIn=true " +
+                            "transport=${liveTransport.get()}",
+                    )
+                }
                 continue
             }
             processChannelVoice(
@@ -494,17 +513,18 @@ class MidiEngine(
         info: PortInfo?,
         ump: Boolean,
     ) {
-        val snapshot = _state.value
-        val listen = snapshot.recordInput.listenChannel
+        val listen = _state.value.recordInput.listenChannel
         val channelOk = listen == null || channel == listen
+        val transport = liveTransport.get()
+        val recordable = type != MidiMessageType.Other && type != MidiMessageType.SysEx
         val wouldRecord =
             isSelectedRecordPort &&
                 channelOk &&
-                snapshot.transport == TransportState.Recording &&
-                type != MidiMessageType.Other &&
-                type != MidiMessageType.SysEx
+                transport == TransportState.Recording &&
+                recordable
 
-        if (MidiDebugLog.enabled) {
+        // Selected-port-only Info logs (observeAll was flooding Active Sensing + notes).
+        if (MidiDebugLog.enabled && isSelectedRecordPort && recordable) {
             MidiDebugLog.i(
                 MidiDebugFormat.formatIncoming(
                     productName = info?.productName.orEmpty(),
@@ -522,15 +542,15 @@ class MidiEngine(
                     channel = channel,
                     listenChannel = listen,
                     channelOk = channelOk,
-                    isSelectedRecordPort = isSelectedRecordPort,
-                    transport = snapshot.transport,
+                    isSelectedRecordPort = true,
+                    transport = transport,
                     wouldRecord = wouldRecord,
                 ),
             )
         }
 
         if (!isSelectedRecordPort) return
-        if (type == MidiMessageType.Other || type == MidiMessageType.SysEx) return
+        if (!recordable) return
 
         if (channelOk) {
             val part = activePart()
@@ -545,8 +565,11 @@ class MidiEngine(
             }
         }
 
-        if (snapshot.transport != TransportState.Recording || !channelOk) return
+        if (transport != TransportState.Recording || !channelOk) return
         recordBuffer += MidiEvent(positionTicks.get(), type, channel, d1, d2)
+        if (MidiDebugLog.enabled && type == MidiMessageType.NoteOn) {
+            MidiDebugLog.i("recorded NoteOn tick=${positionTicks.get()} ch=$channel note=$d1 buf=${recordBuffer.size}")
+        }
     }
 
     private fun logRealtimeOrClock(
@@ -558,21 +581,22 @@ class MidiEngine(
         isSelectedRecordPort: Boolean,
         ump: Boolean,
     ) {
-        if (!MidiDebugLog.enabled) return
+        if (!MidiDebugLog.enabled || !isSelectedRecordPort) return
+        // Active Sensing floods (~3–4 Hz on MODX); never Info-log it.
+        if (status == 0xFE) return
         val label = when (status) {
             0xF8 -> "Clock"
             0xFA -> "Start"
             0xFB -> "Continue"
             0xFC -> "Stop"
-            0xFE -> "ActiveSense"
             0xFF -> "Reset"
             else -> "Realtime"
         }
         val line =
             "IN $label status=0x${"%02X".format(status)} port=$portKey " +
                 "device=\"${info?.deviceName}\" ump=$ump bytes=[${MidiDebugFormat.formatBytes(data, 0, data.size)}] " +
-                "tNs=$timestampNs selectedIn=$isSelectedRecordPort"
-        if (status == 0xF8 || status == 0xFE) {
+                "tNs=$timestampNs transport=${liveTransport.get()}"
+        if (status == 0xF8) {
             logThrottled(portKey, line)
         } else {
             MidiDebugLog.i(line)
@@ -635,10 +659,8 @@ class MidiEngine(
                     }
                     if (remaining <= 0) {
                         countInTicksLeft.set(0)
-                        _state.update {
-                            it.copy(transport = TransportState.Recording, countInBeatsRemaining = 0)
-                        }
-                        MidiDebugLog.i("transport=Recording (count-in done)")
+                        setTransport(TransportState.Recording, clearCountIn = true)
+                        MidiDebugLog.i("transport=Recording (count-in done) live=${liveTransport.get()}")
                     }
                 }
 
@@ -746,29 +768,62 @@ class MidiEngine(
      * USB MIDI 2.0 devices expose MIDI1 + UMP alternate settings; only one may be open.
      * Opening both for the same physical MODX was crashing Timber on SDK 37 before openDevice OK.
      */
-    private fun enforceExclusiveFamilyOpen(familyKey: String, wantUmp: Boolean) {
+    private fun enforceExclusiveFamilyOpen(
+        familyKey: String,
+        wantUmp: Boolean,
+        openDelayMs: Long = 0L,
+    ) {
         val members = listedDevices.values.filter { it.familyKey == familyKey }
         if (members.isEmpty()) return
 
-        // Close the transport we do not want (and any pending opens).
+        pendingExclusiveOpen?.let { mainHandler.removeCallbacks(it) }
+        pendingExclusiveOpen = null
+
+        // Always close the opposite transport (and drop its receivers) before opening the other.
+        var closedOpposite = false
         for (member in members) {
             if (member.isUmp == wantUmp) continue
-            if (openDevices.containsKey(member.info.id) || pendingOpenDeviceIds.contains(member.info.id)) {
+            if (openDevices.containsKey(member.info.id) ||
+                pendingOpenDeviceIds.contains(member.info.id) ||
+                inputReceivers.keys.any { it.startsWith("${member.info.id}:") }
+            ) {
                 MidiDebugLog.i(
                     "exclusiveClose id=${member.info.id} transport=${transportLabel(member.isUmp)} " +
                         "family=\"$familyKey\" wantUmp=$wantUmp",
                 )
                 closeDevice(member.info.id)
+                closedOpposite = true
             }
         }
 
         val targets = members.filter { it.isUmp == wantUmp }
         if (targets.isEmpty()) {
             MidiDebugLog.w("exclusiveOpen no ${transportLabel(wantUmp)} member for family=\"$familyKey\"")
+            reconnectInputReceivers()
             return
         }
-        for (target in targets) {
-            openDeviceIfNeeded(target.info, target.isUmp, familyKey)
+
+        val openTargets = Runnable {
+            pendingExclusiveOpen = null
+            // Re-resolve members in case refresh raced.
+            val latest = listedDevices.values.filter { it.familyKey == familyKey && it.isUmp == wantUmp }
+            for (target in latest.ifEmpty { targets }) {
+                openDeviceIfNeeded(target.info, target.isUmp, familyKey)
+            }
+            reconnectInputReceivers()
+        }
+
+        if (closedOpposite && openDelayMs > 0L) {
+            MidiDebugLog.i(
+                "exclusiveOpen delayed ${openDelayMs}ms family=\"$familyKey\" " +
+                    "want=${transportLabel(wantUmp)} (USB alt-setting settle)",
+            )
+            pendingExclusiveOpen = openTargets
+            mainHandler.postDelayed(openTargets, openDelayMs)
+            // Drop any leftover receivers immediately so UMP stops spamming after MIDI1 selected.
+            reconnectInputReceivers()
+        } else {
+            openTargets.run()
         }
     }
 
@@ -858,7 +913,10 @@ class MidiEngine(
                         "openDevice OK id=${info.id} name=\"${deviceDisplayName(info)}\" " +
                             "transport=${transportLabel(isUmp)} family=\"$familyKey\"",
                     )
-                    if (isUmp) umpGuard.clearAttempt()
+                    if (isUmp) {
+                        umpGuard.clearAttempt()
+                        umpDeviceIds.add(info.id)
+                    }
                     openDevices[info.id] = device
                     ensurePortsOpen(info, device, isUmp)
                     reconnectInputReceivers()
@@ -877,10 +935,22 @@ class MidiEngine(
         } catch (t: Exception) {
             pendingOpenDeviceIds.remove(info.id)
             if (isUmp) umpGuard.clearAttempt()
-            MidiDebugLog.e("openDevice threw id=${info.id} ump=$isUmp", t)
+            MidiDebugLog.e("openDevice threw id=${info.id} ump=$isUmp family=\"$familyKey\"", t)
             if (isUmp) {
                 familyWantUmp[familyKey] = false
-                enforceExclusiveFamilyOpen(familyKey, wantUmp = false)
+                mainHandler.post {
+                    enforceExclusiveFamilyOpen(familyKey, wantUmp = false, openDelayMs = EXCLUSIVE_SWITCH_DELAY_MS)
+                }
+            } else {
+                // MIDI1 open failed (often "already in use") — restore UMP if available.
+                val hasUmp = listedDevices.values.any { it.familyKey == familyKey && it.isUmp }
+                if (hasUmp && !umpGuard.isBlocked(familyKey)) {
+                    MidiDebugLog.w("MIDI1 open failed; restoring UMP exclusive for family=\"$familyKey\"")
+                    familyWantUmp[familyKey] = true
+                    mainHandler.postDelayed({
+                        enforceExclusiveFamilyOpen(familyKey, wantUmp = true, openDelayMs = EXCLUSIVE_SWITCH_DELAY_MS)
+                    }, EXCLUSIVE_SWITCH_DELAY_MS)
+                }
             }
         }
     }
@@ -936,50 +1006,23 @@ class MidiEngine(
     }
 
     /**
-     * Attach receivers. Release: selected record-in only.
-     * Debug: every open input port so logcat shows which device/port actually emits.
+     * Attach a receiver only on the selected record-in port.
+     * (observeAll flooded Active Sensing + made port switches look broken.)
      */
     private fun reconnectInputReceivers() {
         val targetKey = selectedRecordPortKey()
-        val observeAll = MidiDebugLog.enabled
         MidiDebugLog.i(
             "reconnectInputReceivers target=${targetKey ?: "none"} " +
-                "openInputs=${inputPorts.keys.sorted()} observeAll=$observeAll " +
+                "openInputs=${inputPorts.keys.sorted()} observeAll=false " +
                 "listen=${_state.value.recordInput.listenChannel ?: "Omni"} " +
-                "umpDevices=${umpDeviceIds.sorted()}",
+                "umpDevices=${umpDeviceIds.sorted()} transport=${liveTransport.get()}",
         )
 
-        if (targetKey == null && !observeAll) return
-
+        // Disconnect everything that isn't the selected record-in.
         for ((key, port) in inputPorts) {
             val existing = inputReceivers[key]
-            val shouldListen = observeAll || key == targetKey
-            if (shouldListen) {
-                if (existing == null) {
-                    val selectedAtConnect = key == targetKey
-                    val receiver = object : MidiReceiver() {
-                        override fun onSend(msg: ByteArray, offset: Int, count: Int, timestamp: Long) {
-                            try {
-                                val selectedNow = key == selectedRecordPortKey()
-                                onIncomingMidi(msg, offset, count, timestamp, key, selectedNow)
-                            } catch (t: Exception) {
-                                MidiDebugLog.e("onSend handler crashed $key", t)
-                            }
-                        }
-                    }
-                    try {
-                        port.connect(receiver)
-                        inputReceivers[key] = receiver
-                        val meta = inputPortInfo[key]
-                        MidiDebugLog.i(
-                            "connectedReceiver $key selected=$selectedAtConnect " +
-                                "ump=${meta?.isUmp == true} info=${meta?.label}",
-                        )
-                    } catch (t: Exception) {
-                        MidiDebugLog.e("connectReceiver failed $key", t)
-                    }
-                }
-            } else if (existing != null) {
+            if (key == targetKey) continue
+            if (existing != null) {
                 try {
                     port.disconnect(existing)
                     MidiDebugLog.i("disconnectedReceiver $key")
@@ -990,11 +1033,36 @@ class MidiEngine(
             }
         }
 
-        if (targetKey != null && !inputPorts.containsKey(targetKey)) {
+        if (targetKey == null) return
+
+        val port = inputPorts[targetKey]
+        if (port == null) {
             MidiDebugLog.w(
                 "selected record-in $targetKey not open yet " +
                     "(openInputs=${inputPorts.keys.sorted()}) — waiting for openDevice",
             )
+            return
+        }
+        if (inputReceivers.containsKey(targetKey)) return
+
+        val receiver = object : MidiReceiver() {
+            override fun onSend(msg: ByteArray, offset: Int, count: Int, timestamp: Long) {
+                try {
+                    onIncomingMidi(msg, offset, count, timestamp, targetKey, isSelectedRecordPort = true)
+                } catch (t: Exception) {
+                    MidiDebugLog.e("onSend handler crashed $targetKey", t)
+                }
+            }
+        }
+        try {
+            port.connect(receiver)
+            inputReceivers[targetKey] = receiver
+            val meta = inputPortInfo[targetKey]
+            MidiDebugLog.i(
+                "connectedReceiver $targetKey selected=true ump=${meta?.isUmp == true} info=${meta?.label}",
+            )
+        } catch (t: Exception) {
+            MidiDebugLog.e("connectReceiver failed $targetKey", t)
         }
     }
 
@@ -1027,7 +1095,7 @@ class MidiEngine(
         inputPorts.keys.filter { it.startsWith("$deviceId:") }.forEach { key ->
             val receiver = inputReceivers.remove(key)
             val port = inputPorts.remove(key)
-            inputPortInfo.remove(key)
+            // Keep inputPortInfo metadata for UI/logging across exclusive switches.
             nullOpenLogged.remove("in:$key")
             lastClockLogMs.remove(key)
             try {
@@ -1036,7 +1104,6 @@ class MidiEngine(
             } catch (_: Exception) {
             }
         }
-        umpDeviceIds.remove(deviceId)
         try {
             openDevices.remove(deviceId)?.close()
         } catch (_: Exception) {
@@ -1063,15 +1130,12 @@ class MidiEngine(
             return !port.isUmp || !umpGuard.isBlocked(family)
         }
 
-        val modxUmpExists = inputs.any { it.isModxFamily && it.isUmp && !it.isProbeApp && umpAllowed(it) }
-        val modxExists = inputs.any { it.isModxFamily && !it.isProbeApp }
+        // Honor explicit user/current selection — do NOT force-upgrade MIDI1 → UMP on refresh
+        // (that undid setRecordInput and left orphan UMP receivers).
         val keepCurrent = current.endpoint.isSet &&
             currentPort != null &&
             !currentPort.isProbeApp &&
-            !currentUmpBlocked &&
-            !(currentPort.let { !it.isModxFamily && modxExists }) &&
-            // Prefer MODX UMP over MODX MIDI 1.0 when UMP is allowed.
-            !(currentPort.isModxFamily && !currentPort.isUmp && modxUmpExists)
+            !currentUmpBlocked
         if (keepCurrent) return current
 
         val preferred = inputs
@@ -1182,13 +1246,42 @@ class MidiEngine(
 
     private fun transportLabel(isUmp: Boolean): String = if (isUmp) "UMP" else "MIDI1"
 
-    private fun deviceFamilyKey(info: MidiDeviceInfo, displayName: String): String =
-        MidiDeviceFamily.key(
+    private fun setTransport(
+        transport: TransportState,
+        resetPosition: Boolean = false,
+        clearCountIn: Boolean = false,
+    ) {
+        liveTransport.set(transport)
+        _state.update {
+            it.copy(
+                transport = transport,
+                positionTicks = if (resetPosition) 0 else it.positionTicks,
+                countInBeatsRemaining = if (clearCountIn) 0 else it.countInBeatsRemaining,
+            )
+        }
+    }
+
+    private fun deviceFamilyKey(info: MidiDeviceInfo, displayName: String): String {
+        val usb: UsbDevice? = if (Build.VERSION.SDK_INT >= 33) {
+            info.properties.getParcelable(MidiDeviceInfo.PROPERTY_USB_DEVICE, UsbDevice::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            info.properties.getParcelable(MidiDeviceInfo.PROPERTY_USB_DEVICE)
+        }
+        val usbKey = usb?.let { "usb:${it.vendorId}:${it.productId}:${it.deviceName}" }
+        return MidiDeviceFamily.key(
             serialNumber = info.properties.getString(MidiDeviceInfo.PROPERTY_SERIAL_NUMBER),
             displayName = displayName,
             productName = deviceProductName(info),
             deviceId = info.id,
+            usbKey = usbKey,
         )
+    }
+
+    companion object {
+        /** USB MIDI alt-setting release needs a beat before the sibling transport can open. */
+        private const val EXCLUSIVE_SWITCH_DELAY_MS = 350L
+    }
 
     private fun isProbeAppName(name: String?): Boolean {
         if (name.isNullOrBlank()) return false

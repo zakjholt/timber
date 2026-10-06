@@ -23,7 +23,11 @@ class MidiDeviceFamilyTest {
     }
 
     @Test
-    fun key_prefersSerial() {
+    fun key_prefersUsbThenSerial() {
+        assertEquals(
+            "usb:1177:1:foo",
+            MidiDeviceFamily.key("ABC", "MODX M MIDI 1.0", "MODX M", 1, usbKey = "usb:1177:1:foo"),
+        )
         assertEquals(
             "serial:ABC",
             MidiDeviceFamily.key("ABC", "MODX M MIDI 1.0", "MODX M", 1),

@@ -90,7 +90,7 @@ adb logcat -c
 adb logcat -s TimberMidi:I '*:S'
 ```
 
-Then in Timber: look for `MODX UMP: YES openMode=OPEN_UMP` (Timber opens **either** UMP **or** MIDI 1.0 for MODX — never both; dual-open crashed on Pixel SDK 37). Prefer Record in `… · UMP · …` + **Omni** → arm → **Record** → play. Expect `IN … UMP1/UMP2`. If a prior UMP open crashed the app, logs show `blocking UMP auto-open` and MIDI1 is used until app data is cleared.
+Then in Timber: look for `MODX UMP: YES openMode=OPEN_UMP`. Timber opens **either** UMP **or** MIDI 1.0 (never both). Record-in switches close the other alt-setting first (~350ms). Logs are **selected record-in only** (Active Sensing is suppressed). After count-in, `IN … wouldRecord=true transport=Recording` and `recorded NoteOn` should appear while keys are held.
 
 **Fatal crash capture** (if it still dies):
 

@@ -5,7 +5,14 @@ package dev.timber.app.engine.midi
  * Display names look like "Yamaha Corporation MODX M#577 MIDI 1.0" / "... MIDI 2.0".
  */
 object MidiDeviceFamily {
-    fun key(serialNumber: String?, displayName: String, productName: String, deviceId: Int): String {
+    fun key(
+        serialNumber: String?,
+        displayName: String,
+        productName: String,
+        deviceId: Int,
+        usbKey: String? = null,
+    ): String {
+        if (!usbKey.isNullOrBlank()) return usbKey
         if (!serialNumber.isNullOrBlank()) return "serial:$serialNumber"
         val stripped = displayName
             .replace(Regex("""\s*#\d+\s*"""), " ")
