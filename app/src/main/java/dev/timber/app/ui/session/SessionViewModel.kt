@@ -18,6 +18,7 @@ import dev.timber.app.domain.session.SessionState
 import dev.timber.app.engine.TimberEngineService
 import dev.timber.app.engine.audio.AudioEngine
 import dev.timber.app.engine.midi.MidiEngine
+import dev.timber.app.engine.midi.usb.UserspaceUsbMidiMode
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -53,13 +54,16 @@ data class TimberUiState(
     val deviceNotes: String = SessionState.bootstrap().deviceNotes,
     val meters: List<MeterPeak> = emptyList(),
     val masterMeter: MeterPeak = MeterPeak(channelId = -1),
+    val userspaceMode: UserspaceUsbMidiMode = UserspaceUsbMidiMode.Auto,
+    val userspaceActive: Boolean = false,
+    val userspaceStatus: String = "",
 )
 
 class SessionViewModel(application: Application) : AndroidViewModel(application) {
     private val midiManager = application.getSystemService(Context.MIDI_SERVICE) as? MidiManager
     private val audioManager = application.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
-    private val midiEngine = MidiEngine(midiManager)
+    private val midiEngine = MidiEngine(midiManager, application)
     private val audioEngine = AudioEngine()
 
     private val _ui = MutableStateFlow(TimberUiState())
@@ -91,6 +95,9 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
                         countInBeatsRemaining = midi.countInBeatsRemaining,
                         countInPulse = midi.countInPulse,
                         countInBeats = midi.countInBeats,
+                        userspaceMode = midi.userspaceMode,
+                        userspaceActive = midi.userspaceActive,
+                        userspaceStatus = midi.userspaceStatus,
                         session = it.session.copy(
                             song = midi.song,
                             transport = it.session.transport.copy(
@@ -143,6 +150,8 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     fun setRecordListenChannel(channel: Int?) = midiEngine.setRecordListenChannel(channel)
     fun setTrackOutput(trackId: Int, endpoint: MidiEndpointRef, channel: Int) =
         midiEngine.setTrackOutput(trackId, endpoint, channel)
+
+    fun cycleUserspaceMidiMode() = midiEngine.cycleUserspaceMode()
 
     fun setChannelGain(channelId: Int, gainDb: Float) = audioEngine.setChannelGain(channelId, gainDb)
     fun toggleChannelMute(channelId: Int) = audioEngine.toggleMute(channelId)

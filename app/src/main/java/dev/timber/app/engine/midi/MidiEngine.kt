@@ -1,5 +1,6 @@
 package dev.timber.app.engine.midi
 
+import android.content.Context
 import android.media.midi.MidiDevice
 import android.media.midi.MidiDeviceInfo
 import android.media.midi.MidiInputPort
@@ -8,6 +9,7 @@ import android.media.midi.MidiOutputPort
 import android.media.midi.MidiReceiver
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import dev.timber.app.device.ModxMProfile
 import dev.timber.app.domain.midi.MidiEndpointRef
 import dev.timber.app.domain.midi.MidiEvent
@@ -18,6 +20,10 @@ import dev.timber.app.domain.midi.Part
 import dev.timber.app.domain.midi.RecordInputConfig
 import dev.timber.app.domain.midi.Song
 import dev.timber.app.domain.midi.TransportState
+import dev.timber.app.engine.midi.usb.UserspaceUsbMidiHost
+import dev.timber.app.engine.midi.usb.UserspaceUsbMidiMode
+import dev.timber.app.engine.midi.usb.UserspaceUsbMidiPrefs
+import dev.timber.app.engine.midi.usb.UserspaceUsbMidiStatus
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -32,9 +38,13 @@ import kotlin.concurrent.thread
 /**
  * Realtime MIDI scheduler / recorder. Clock thread owns musical time; UI observes [state].
  * Android: [MidiInputPort] = app writes (our out); [MidiOutputPort] = device writes (our in).
+ *
+ * Userspace USB-MIDI (Path B) is gated by [UserspaceUsbMidiMode] and feeds the same
+ * [onIncomingMidi] path as the HAL — HAL is never removed.
  */
 class MidiEngine(
     private val midiManager: MidiManager?,
+    private val appContext: Context? = null,
 ) {
     data class PortInfo(
         val deviceId: Int,
@@ -42,12 +52,14 @@ class MidiEngine(
         val deviceName: String,
         val portName: String?,
         val isModxFamily: Boolean,
+        val isUserspace: Boolean = false,
     ) {
         val label: String
             get() = buildString {
                 append(deviceName)
                 if (!portName.isNullOrBlank()) append(" · ").append(portName)
                 else append(" · port ").append(portIndex)
+                if (isUserspace) append(" · USB")
             }
 
         fun toRef(): MidiEndpointRef = MidiEndpointRef(deviceId, portIndex, label)
@@ -65,6 +77,9 @@ class MidiEngine(
         val countInBeatsRemaining: Int = 0,
         val countInPulse: Int = 0,
         val countInBeats: Int = 4,
+        val userspaceMode: UserspaceUsbMidiMode = UserspaceUsbMidiMode.Off,
+        val userspaceActive: Boolean = false,
+        val userspaceStatus: String = "",
     )
 
     private val _state = MutableStateFlow(State())
@@ -83,6 +98,24 @@ class MidiEngine(
     private val inputPorts = ConcurrentHashMap<String, MidiOutputPort>()
     private val inputReceivers = ConcurrentHashMap<String, MidiReceiver>()
 
+    private val userspaceActive = AtomicBoolean(false)
+    private val halEventsSinceArm = AtomicLong(0)
+    private val recordArmElapsedMs = AtomicLong(0)
+    private var silenceWatchThread: Thread? = null
+
+    private val userspaceHost: UserspaceUsbMidiHost? =
+        if (appContext != null) {
+            UserspaceUsbMidiHost(
+                appContext = appContext.applicationContext,
+                onMidiBytes = { cable, data, timestampNs ->
+                    onUserspaceMidi(cable, data, timestampNs)
+                },
+                onStatus = { status -> mainHandler.post { onUserspaceStatus(status) } },
+            )
+        } else {
+            null
+        }
+
     private val deviceCallback = object : MidiManager.DeviceCallback() {
         override fun onDeviceAdded(device: MidiDeviceInfo) = refreshDevices()
 
@@ -93,25 +126,51 @@ class MidiEngine(
     }
 
     init {
+        val mode = appContext?.let { UserspaceUsbMidiPrefs.mode(it) } ?: UserspaceUsbMidiMode.Off
+        _state.update { it.copy(userspaceMode = mode) }
         midiManager?.registerDeviceCallback(deviceCallback, mainHandler)
         refreshDevices()
+        applyUserspaceMode(mode)
     }
 
     fun release() {
         midiManager?.unregisterDeviceCallback(deviceCallback)
+        stopSilenceWatch()
+        userspaceHost?.stop()
+        userspaceActive.set(false)
         stop()
         closeAllDevices()
     }
 
+    fun userspaceMode(): UserspaceUsbMidiMode = _state.value.userspaceMode
+
+    fun setUserspaceMode(mode: UserspaceUsbMidiMode) {
+        appContext?.let { UserspaceUsbMidiPrefs.setMode(it, mode) }
+        _state.update { it.copy(userspaceMode = mode) }
+        MidiDebugLog.i("Userspace USB-MIDI mode=${mode.name}")
+        applyUserspaceMode(mode)
+    }
+
+    fun cycleUserspaceMode(): UserspaceUsbMidiMode {
+        val ctx = appContext ?: return _state.value.userspaceMode
+        val next = UserspaceUsbMidiPrefs.cycle(ctx)
+        setUserspaceMode(next)
+        return next
+    }
+
     fun refreshDevices() {
         val devices = midiManager?.devices?.toList().orEmpty()
-        val names = devices.map { deviceDisplayName(it) }
+        val names = devices.map { deviceDisplayName(it) }.toMutableList()
         val inputs = mutableListOf<PortInfo>()
         val outputs = mutableListOf<PortInfo>()
+        val skipHalInputs = userspaceActive.get()
 
         for (info in devices) {
             val name = deviceDisplayName(info)
             val isModx = ModxMProfile.looksLikeModxFamily(name, null)
+            // When userspace owns the USB MIDI interface, skip opening HAL ports for
+            // MODX-family devices to reduce claim conflicts with the system MIDI service.
+            val openHal = !(skipHalInputs && isModx)
             for (port in info.ports) {
                 val portInfo = PortInfo(
                     deviceId = info.id,
@@ -121,11 +180,32 @@ class MidiEngine(
                     isModxFamily = isModx,
                 )
                 when (port.type) {
-                    MidiDeviceInfo.PortInfo.TYPE_OUTPUT -> inputs += portInfo
+                    MidiDeviceInfo.PortInfo.TYPE_OUTPUT -> {
+                        if (!(skipHalInputs && isModx)) inputs += portInfo
+                    }
                     MidiDeviceInfo.PortInfo.TYPE_INPUT -> outputs += portInfo
                 }
             }
-            openDeviceIfNeeded(info)
+            if (openHal) {
+                openDeviceIfNeeded(info)
+            } else {
+                closeDevice(info.id)
+            }
+        }
+
+        if (userspaceActive.get()) {
+            val hostName = userspaceHost?.activeDeviceName() ?: "Yamaha USB-MIDI"
+            names += "$hostName (userspace)"
+            for (cable in userspaceHost?.listMidiCables().orEmpty()) {
+                inputs += PortInfo(
+                    deviceId = UserspaceUsbMidiHost.SYNTHETIC_DEVICE_ID,
+                    portIndex = cable,
+                    deviceName = hostName,
+                    portName = "cable $cable",
+                    isModxFamily = true,
+                    isUserspace = true,
+                )
+            }
         }
 
         _state.update {
@@ -135,6 +215,7 @@ class MidiEngine(
                 availableOutputs = outputs,
                 recordInput = preferDefaultInput(it.recordInput, inputs),
                 song = ensureTrackOutputs(it.song, outputs),
+                userspaceActive = userspaceActive.get(),
             )
         }
         reconnectRecordInput()
@@ -196,20 +277,25 @@ class MidiEngine(
     fun toggleRecord() {
         when (_state.value.transport) {
             TransportState.Recording -> {
+                stopSilenceWatch()
                 commitRecording()
                 _state.update { it.copy(transport = TransportState.Playing, countInBeatsRemaining = 0) }
             }
             TransportState.CountIn -> {
+                stopSilenceWatch()
                 countInTicksLeft.set(0)
                 _state.update { it.copy(transport = TransportState.Playing, countInBeatsRemaining = 0) }
             }
             TransportState.Playing, TransportState.Stopped -> {
                 recordBuffer.clear()
+                halEventsSinceArm.set(0)
+                recordArmElapsedMs.set(SystemClock.elapsedRealtime())
                 val beats = _state.value.countInBeats.takeIf { it > 0 }
                     ?: (activePart()?.timeSignatureNumerator ?: 4)
                 if (beats <= 0) {
                     if (!running.get()) play()
                     _state.update { it.copy(transport = TransportState.Recording, countInBeatsRemaining = 0) }
+                    maybeStartSilenceWatch()
                     return
                 }
                 countInTicksLeft.set(beats.toLong() * PPQN)
@@ -226,6 +312,7 @@ class MidiEngine(
                     running.set(true)
                     startClock()
                 }
+                maybeStartSilenceWatch()
             }
         }
     }
@@ -236,10 +323,21 @@ class MidiEngine(
         val status = data[offset].toInt() and 0xFF
         if (status >= 0xF8) return
 
+        if (!userspaceActive.get()) {
+            halEventsSinceArm.incrementAndGet()
+        }
+
         val (type, channel) = MidiPlayback.parseStatus(status)
         val d1 = if (count > 1) data[offset + 1].toInt() and 0xFF else 0
         val d2 = if (count > 2) data[offset + 2].toInt() and 0xFF else 0
         val normalizedType = if (type == MidiMessageType.NoteOn && d2 == 0) MidiMessageType.NoteOff else type
+
+        MidiDebugLog.i(
+            "IN status=0x${"%02X".format(status)} bytes=[${
+                (0 until count).joinToString(" ") { "%02X".format(data[offset + it].toInt() and 0xFF) }
+            }] type=$normalizedType ch=$channel transport=${snapshot.transport} " +
+                "userspace=${userspaceActive.get()}",
+        )
 
         val listen = snapshot.recordInput.listenChannel
         val channelOk = listen == null || channel == listen
@@ -507,8 +605,141 @@ class MidiEngine(
         ) {
             return current
         }
-        val preferred = inputs.firstOrNull { it.isModxFamily } ?: inputs.first()
+        val preferred = inputs.firstOrNull { it.isUserspace && it.isModxFamily }
+            ?: inputs.firstOrNull { it.isModxFamily }
+            ?: inputs.first()
         return current.copy(endpoint = preferred.toRef())
+    }
+
+    private fun applyUserspaceMode(mode: UserspaceUsbMidiMode) {
+        when (mode) {
+            UserspaceUsbMidiMode.Off -> {
+                stopSilenceWatch()
+                if (userspaceActive.getAndSet(false)) {
+                    userspaceHost?.stop()
+                }
+                refreshDevices()
+            }
+            UserspaceUsbMidiMode.On -> {
+                stopSilenceWatch()
+                startUserspace("mode=On")
+            }
+            UserspaceUsbMidiMode.Auto -> {
+                if (userspaceActive.get()) {
+                    // Stay on userspace until toggled off; HAL already silent.
+                    return
+                }
+                userspaceHost?.stop()
+                userspaceActive.set(false)
+                refreshDevices()
+            }
+        }
+    }
+
+    private fun startUserspace(reason: String) {
+        val host = userspaceHost ?: run {
+            MidiDebugLog.w("Userspace USB-MIDI unavailable (no Context)")
+            return
+        }
+        MidiDebugLog.i("Starting userspace USB-MIDI ($reason)")
+        // Close HAL MODX opens before claim to reduce interface conflicts.
+        userspaceActive.set(true)
+        refreshDevices()
+        host.start()
+    }
+
+    private fun onUserspaceMidi(cable: Int, data: ByteArray, timestampNs: Long) {
+        val selected = _state.value.recordInput.endpoint
+        if (selected.isSet &&
+            selected.deviceId == UserspaceUsbMidiHost.SYNTHETIC_DEVICE_ID &&
+            selected.portIndex != cable
+        ) {
+            // Only the selected virtual cable feeds record/thru when explicitly chosen.
+            return
+        }
+        onIncomingMidi(data, 0, data.size, timestampNs)
+    }
+
+    private fun onUserspaceStatus(status: UserspaceUsbMidiStatus) {
+        val label = when (status) {
+            is UserspaceUsbMidiStatus.Running -> {
+                userspaceActive.set(true)
+                "Running ${status.deviceName} ifaces=${status.interfaceCount} cables=${status.cables}"
+            }
+            UserspaceUsbMidiStatus.Stopped -> {
+                userspaceActive.set(false)
+                "Stopped"
+            }
+            UserspaceUsbMidiStatus.NoDevice -> {
+                userspaceActive.set(false)
+                "No Yamaha USB MIDI device"
+            }
+            UserspaceUsbMidiStatus.NoMidiInterface -> {
+                userspaceActive.set(false)
+                "No MIDI Streaming interface"
+            }
+            UserspaceUsbMidiStatus.AwaitingPermission -> "Awaiting USB permission"
+            UserspaceUsbMidiStatus.PermissionDenied -> {
+                userspaceActive.set(false)
+                "USB permission denied"
+            }
+            UserspaceUsbMidiStatus.OpenFailed -> {
+                userspaceActive.set(false)
+                "openDevice failed"
+            }
+            UserspaceUsbMidiStatus.ClaimFailed -> {
+                userspaceActive.set(false)
+                "claimInterface failed"
+            }
+        }
+        MidiDebugLog.i("Userspace status: $label")
+        _state.update {
+            it.copy(userspaceActive = userspaceActive.get(), userspaceStatus = label)
+        }
+        when (status) {
+            is UserspaceUsbMidiStatus.Running -> refreshDevices()
+            UserspaceUsbMidiStatus.NoDevice,
+            UserspaceUsbMidiStatus.NoMidiInterface,
+            UserspaceUsbMidiStatus.PermissionDenied,
+            UserspaceUsbMidiStatus.OpenFailed,
+            UserspaceUsbMidiStatus.ClaimFailed,
+            UserspaceUsbMidiStatus.Stopped,
+            -> refreshDevices()
+            UserspaceUsbMidiStatus.AwaitingPermission -> Unit
+        }
+    }
+
+    private fun maybeStartSilenceWatch() {
+        if (_state.value.userspaceMode != UserspaceUsbMidiMode.Auto) return
+        if (userspaceActive.get()) return
+        if (userspaceHost == null) return
+        stopSilenceWatch()
+        silenceWatchThread = thread(name = "timber-midi-silence-watch", isDaemon = true) {
+            MidiDebugLog.i("Auto silence watch started (${AUTO_FALLBACK_MS}ms)")
+            try {
+                Thread.sleep(AUTO_FALLBACK_MS)
+            } catch (_: InterruptedException) {
+                return@thread
+            }
+            val transport = _state.value.transport
+            if (transport != TransportState.Recording && transport != TransportState.CountIn) return@thread
+            if (userspaceActive.get()) return@thread
+            if (halEventsSinceArm.get() > 0) {
+                MidiDebugLog.i("Auto silence watch: HAL delivered ${halEventsSinceArm.get()} events — stay on HAL")
+                return@thread
+            }
+            if (userspaceHost.findYamahaMidiDevice() == null) {
+                MidiDebugLog.w("Auto silence watch: no Yamaha USB device to claim")
+                return@thread
+            }
+            MidiDebugLog.w("Auto silence watch: HAL silent — falling back to userspace USB-MIDI")
+            mainHandler.post { startUserspace("auto-fallback") }
+        }
+    }
+
+    private fun stopSilenceWatch() {
+        silenceWatchThread?.interrupt()
+        silenceWatchThread = null
     }
 
     private fun ensureTrackOutputs(song: Song, outputs: List<PortInfo>): Song {
@@ -538,4 +769,9 @@ class MidiEngine(
             ?: "MIDI ${info.id}"
 
     private fun portKey(deviceId: Int, portIndex: Int): String = "$deviceId:$portIndex"
+
+    companion object {
+        /** How long Auto mode waits for HAL channel-voice before claiming USB. */
+        const val AUTO_FALLBACK_MS: Long = 2_500L
+    }
 }
