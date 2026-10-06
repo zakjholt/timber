@@ -6,6 +6,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -73,6 +74,20 @@ private fun TimberAppScaffold(
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 16.dp),
+        )
+        val pathLabel = buildString {
+            append("MIDI path: ").append(state.userspaceMode.label)
+            if (state.userspaceActive) append(" · active")
+            if (state.userspaceStatus.isNotBlank()) append(" · ").append(state.userspaceStatus)
+            append(" (tap to cycle)")
+        }
+        Text(
+            text = pathLabel,
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier
+                .padding(horizontal = 16.dp, vertical = 4.dp)
+                .clickable { viewModel.cycleUserspaceMidiMode() },
         )
         Spacer(modifier = Modifier.height(8.dp))
         TransportBar(
