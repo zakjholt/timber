@@ -66,6 +66,38 @@ Publishing a release (keystore secrets, first tag): [docs/RELEASE.md](docs/RELEA
 
 Needs Android SDK 35, NDK, and a USB-host device for MODX testing.
 
+### Debug APK (sideload + MIDI logcat)
+
+Debug builds enumerate **MIDI 1.0 and UMP (MIDI 2.0)** devices, attach receivers on all open input ports, and log under tag `TimberMidi`. MODX defaults prefer UMP ports; apps like MidiTapLatencyTester are de-prioritized.
+
+**Local**
+
+```bash
+./gradlew :app:assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+**CI:** Actions → **Debug APK** → Run workflow (or open a PR that touches MIDI). Download the `timber-debug` artifact (`timber-debug.apk`), then:
+
+```bash
+adb install -r timber-debug.apk
+```
+
+**Capture logs** (OTG + MODX connected, Local Control off; quit MidiTapLatencyTester if open):
+
+```bash
+adb logcat -c
+adb logcat -s TimberMidi:I '*:S'
+```
+
+Then in Timber: look for `MODX UMP: YES openMode=OPEN_UMP`. Timber opens **either** UMP **or** MIDI 1.0 (never both). Record-in switches close the other alt-setting first (~350ms). Logs are **selected record-in only** (Active Sensing is suppressed). After count-in, `IN … wouldRecord=true transport=Recording` and `recorded NoteOn` should appear while keys are held.
+
+**Fatal crash capture** (if it still dies):
+
+```bash
+adb logcat -b crash -b main '*:E' AndroidRuntime:E TimberMidi:I '*:S'
+```
+
 ## Manual test (Pixel 11 Pro + MODX)
 
 1. Install debug APK; MODX **Local Control off**.

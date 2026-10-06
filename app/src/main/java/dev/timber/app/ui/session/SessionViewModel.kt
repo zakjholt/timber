@@ -18,6 +18,7 @@ import dev.timber.app.domain.session.SessionState
 import dev.timber.app.engine.TimberEngineService
 import dev.timber.app.engine.audio.AudioEngine
 import dev.timber.app.engine.midi.MidiEngine
+import dev.timber.app.engine.midi.UmpOpenGuard
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -59,7 +60,10 @@ class SessionViewModel(application: Application) : AndroidViewModel(application)
     private val midiManager = application.getSystemService(Context.MIDI_SERVICE) as? MidiManager
     private val audioManager = application.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
-    private val midiEngine = MidiEngine(midiManager)
+    private val midiEngine = MidiEngine(
+        midiManager = midiManager,
+        umpPrefs = application.getSharedPreferences(UmpOpenGuard.PREFS_NAME, Context.MODE_PRIVATE),
+    )
     private val audioEngine = AudioEngine()
 
     private val _ui = MutableStateFlow(TimberUiState())
