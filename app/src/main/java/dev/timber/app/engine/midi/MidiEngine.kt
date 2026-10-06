@@ -1,5 +1,6 @@
 package dev.timber.app.engine.midi
 
+import android.content.SharedPreferences
 import android.media.midi.MidiDevice
 import android.media.midi.MidiDeviceInfo
 import android.media.midi.MidiInputPort
@@ -36,10 +37,16 @@ import kotlin.concurrent.thread
  * Android: [MidiInputPort] = app writes (our out); [MidiOutputPort] = device writes (our in).
  *
  * Enumerates both MIDI 1.0 byte-stream and Universal MIDI Packet (UMP / MIDI 2.0) transports.
+ *
+ * Important: a USB MIDI 2.0 gadget may only be opened as **either** MIDI 1.0 **or** UMP at once
+ * (Android alternate-setting exclusivity). Opening both for the same physical device crashes
+ * on some SDK 37 stacks — see [UmpOpenGuard] + exclusive family open.
  */
 class MidiEngine(
     private val midiManager: MidiManager?,
+    umpPrefs: SharedPreferences? = null,
 ) {
+    private val umpGuard = UmpOpenGuard(umpPrefs)
     data class PortInfo(
         val deviceId: Int,
         val portIndex: Int,
@@ -99,6 +106,17 @@ class MidiEngine(
     private val umpDeviceIds = ConcurrentHashMap.newKeySet<Int>()
     private val nullOpenLogged = ConcurrentHashMap.newKeySet<String>()
     private val lastClockLogMs = ConcurrentHashMap<String, Long>()
+    /** deviceId → (MidiDeviceInfo, isUmp, familyKey) from last refresh. */
+    private val listedDevices = ConcurrentHashMap<Int, ListedDevice>()
+    /** familyKey → want UMP open (exclusive vs MIDI1). */
+    private val familyWantUmp = ConcurrentHashMap<String, Boolean>()
+
+    private data class ListedDevice(
+        val info: MidiDeviceInfo,
+        val isUmp: Boolean,
+        val familyKey: String,
+        val isModxFamily: Boolean,
+    )
 
     private fun deviceCallback(expectedUmp: Boolean?) = object : MidiManager.DeviceCallback() {
         override fun onDeviceAdded(device: MidiDeviceInfo) {
@@ -131,6 +149,13 @@ class MidiEngine(
         MidiDebugLog.i(
             "MidiEngine init debugLogging=${MidiDebugLog.enabled} sdk=${Build.VERSION.SDK_INT}",
         )
+        umpGuard.consumePreviousCrash()?.let { family ->
+            MidiDebugLog.e(
+                "UMP open previously crashed for family=\"$family\" — " +
+                    "blocking UMP auto-open; using MIDI1 exclusive for that family. " +
+                    "Clear app data to retry UMP.",
+            )
+        }
         registerCallbacks()
         refreshDevices()
     }
@@ -147,6 +172,7 @@ class MidiEngine(
         val inputs = mutableListOf<PortInfo>()
         val outputs = mutableListOf<PortInfo>()
         val seenIds = HashSet<Int>()
+        listedDevices.clear()
 
         for ((info, isUmp) in devices) {
             seenIds += info.id
@@ -157,7 +183,9 @@ class MidiEngine(
                 ModxMProfile.looksLikeModxFamily(product, null)
             val probe = isProbeAppName(name) || isProbeAppName(product)
             val protocol = safeProtocol(info)
+            val family = deviceFamilyKey(info, name)
             if (isUmp) umpDeviceIds.add(info.id) else umpDeviceIds.remove(info.id)
+            listedDevices[info.id] = ListedDevice(info, isUmp, family, isModx)
 
             for (port in info.ports) {
                 val portInfo = PortInfo(
@@ -179,7 +207,14 @@ class MidiEngine(
                     MidiDeviceInfo.PortInfo.TYPE_INPUT -> outputs += portInfo
                 }
             }
-            openDeviceIfNeeded(info, isUmp)
+        }
+
+        // Resolve exclusive open mode per physical device family, then open only that transport.
+        val families = listedDevices.values.map { it.familyKey }.toSet()
+        for (family in families) {
+            val wantUmp = resolveWantUmp(family)
+            familyWantUmp[family] = wantUmp
+            enforceExclusiveFamilyOpen(family, wantUmp)
         }
 
         // Drop stale open devices that disappeared from both transports.
@@ -200,8 +235,11 @@ class MidiEngine(
                     "If notes stay silent on MIDI1, keyboard events may be on a missing UMP device.",
             )
         } else {
+            val family = listedDevices[modxUmpInputs.first().deviceId]?.familyKey
+            val mode = if (family != null && familyWantUmp[family] == true) "OPEN_UMP" else "MIDI1_EXCLUSIVE"
+            val blocked = family != null && umpGuard.isBlocked(family)
             MidiDebugLog.i(
-                "MODX UMP: YES count=${modxUmpInputs.size} " +
+                "MODX UMP: YES count=${modxUmpInputs.size} openMode=$mode blocked=$blocked " +
                     modxUmpInputs.joinToString { "id=${it.deviceId}:port=${it.portIndex}(${it.portName})" },
             )
         }
@@ -247,7 +285,15 @@ class MidiEngine(
 
     fun setRecordInput(endpoint: MidiEndpointRef) {
         _state.update { it.copy(recordInput = it.recordInput.copy(endpoint = endpoint)) }
-        MidiDebugLog.i("setRecordInput ${endpoint.displayName} id=${endpoint.deviceId} port=${endpoint.portIndex}")
+        val listed = listedDevices[endpoint.deviceId]
+        MidiDebugLog.i(
+            "setRecordInput ${endpoint.displayName} id=${endpoint.deviceId} port=${endpoint.portIndex} " +
+                "ump=${listed?.isUmp == true} family=${listed?.familyKey}",
+        )
+        if (listed != null) {
+            familyWantUmp[listed.familyKey] = listed.isUmp
+            enforceExclusiveFamilyOpen(listed.familyKey, wantUmp = listed.isUmp)
+        }
         reconnectInputReceivers()
     }
 
@@ -696,7 +742,69 @@ class MidiEngine(
         }
     }
 
-    private fun openDeviceIfNeeded(info: MidiDeviceInfo, isUmp: Boolean) {
+    /**
+     * USB MIDI 2.0 devices expose MIDI1 + UMP alternate settings; only one may be open.
+     * Opening both for the same physical MODX was crashing Timber on SDK 37 before openDevice OK.
+     */
+    private fun enforceExclusiveFamilyOpen(familyKey: String, wantUmp: Boolean) {
+        val members = listedDevices.values.filter { it.familyKey == familyKey }
+        if (members.isEmpty()) return
+
+        // Close the transport we do not want (and any pending opens).
+        for (member in members) {
+            if (member.isUmp == wantUmp) continue
+            if (openDevices.containsKey(member.info.id) || pendingOpenDeviceIds.contains(member.info.id)) {
+                MidiDebugLog.i(
+                    "exclusiveClose id=${member.info.id} transport=${transportLabel(member.isUmp)} " +
+                        "family=\"$familyKey\" wantUmp=$wantUmp",
+                )
+                closeDevice(member.info.id)
+            }
+        }
+
+        val targets = members.filter { it.isUmp == wantUmp }
+        if (targets.isEmpty()) {
+            MidiDebugLog.w("exclusiveOpen no ${transportLabel(wantUmp)} member for family=\"$familyKey\"")
+            return
+        }
+        for (target in targets) {
+            openDeviceIfNeeded(target.info, target.isUmp, familyKey)
+        }
+    }
+
+    private fun resolveWantUmp(familyKey: String): Boolean {
+        val members = listedDevices.values.filter { it.familyKey == familyKey }
+        val hasUmp = members.any { it.isUmp }
+        val hasMidi1 = members.any { !it.isUmp }
+        val isModx = members.any { it.isModxFamily }
+        val blocked = umpGuard.isBlocked(familyKey)
+        val selected = _state.value.recordInput.endpoint
+        val selectedListed = listedDevices[selected.deviceId]
+
+        // Explicit user selection wins (unless UMP blocked — then force MIDI1).
+        if (selected.isSet && selectedListed?.familyKey == familyKey) {
+            if (selectedListed.isUmp && blocked) {
+                MidiDebugLog.w(
+                    "record-in is UMP but family=\"$familyKey\" blocked after crash — falling back to MIDI1",
+                )
+                return false
+            }
+            return selectedListed.isUmp
+        }
+
+        // Sticky choice from prior selection / refresh.
+        familyWantUmp[familyKey]?.let { previous ->
+            if (previous && (!hasUmp || blocked)) return false
+            if (!previous && !hasMidi1 && hasUmp && !blocked) return true
+            return previous
+        }
+
+        // Default: MODX prefers UMP (notes were silent on MIDI1) unless crash-blocked.
+        if (isModx && hasUmp && !blocked) return true
+        return false
+    }
+
+    private fun openDeviceIfNeeded(info: MidiDeviceInfo, isUmp: Boolean, familyKey: String) {
         if (midiManager == null) return
         openDevices[info.id]?.let { device ->
             // Already open — only ensure missing ports; never thrash reopen.
@@ -709,35 +817,72 @@ class MidiEngine(
         }
         val generation = (openGeneration[info.id] ?: 0) + 1
         openGeneration[info.id] = generation
+        if (isUmp) {
+            umpGuard.beginAttempt(familyKey)
+        }
         MidiDebugLog.i(
             "openDevice request id=${info.id} name=\"${deviceDisplayName(info)}\" " +
-                "transport=${transportLabel(isUmp)} protocol=${UmpCodec.protocolLabel(safeProtocol(info))} gen=$generation",
+                "transport=${transportLabel(isUmp)} protocol=${UmpCodec.protocolLabel(safeProtocol(info))} " +
+                "family=\"$familyKey\" exclusive=${transportLabel(isUmp)} gen=$generation",
         )
-        midiManager.openDevice(info, { device ->
-            pendingOpenDeviceIds.remove(info.id)
-            if (openGeneration[info.id] != generation) {
-                MidiDebugLog.w("openDevice stale callback ignored id=${info.id} gen=$generation")
+        try {
+            midiManager.openDevice(info, { device ->
                 try {
-                    device?.close()
-                } catch (_: Exception) {
+                    pendingOpenDeviceIds.remove(info.id)
+                    if (openGeneration[info.id] != generation) {
+                        MidiDebugLog.w("openDevice stale callback ignored id=${info.id} gen=$generation")
+                        try {
+                            device?.close()
+                        } catch (_: Exception) {
+                        }
+                        if (isUmp) umpGuard.clearAttempt()
+                        return@openDevice
+                    }
+                    if (device == null) {
+                        MidiDebugLog.e(
+                            "openDevice FAILED (null) id=${info.id} name=\"${deviceDisplayName(info)}\" " +
+                                "transport=${transportLabel(isUmp)} family=\"$familyKey\" " +
+                                "— USB permission, exclusive lock, or sibling still open?",
+                        )
+                        if (isUmp) {
+                            umpGuard.clearAttempt()
+                            // Fall back to MIDI1 for this family.
+                            familyWantUmp[familyKey] = false
+                            mainHandler.post {
+                                enforceExclusiveFamilyOpen(familyKey, wantUmp = false)
+                            }
+                        }
+                        return@openDevice
+                    }
+                    MidiDebugLog.i(
+                        "openDevice OK id=${info.id} name=\"${deviceDisplayName(info)}\" " +
+                            "transport=${transportLabel(isUmp)} family=\"$familyKey\"",
+                    )
+                    if (isUmp) umpGuard.clearAttempt()
+                    openDevices[info.id] = device
+                    ensurePortsOpen(info, device, isUmp)
+                    reconnectInputReceivers()
+                } catch (t: Exception) {
+                    if (isUmp) umpGuard.clearAttempt()
+                    MidiDebugLog.e("openDevice callback crashed id=${info.id} ump=$isUmp", t)
+                    if (isUmp) {
+                        familyWantUmp[familyKey] = false
+                        mainHandler.post {
+                            closeDevice(info.id)
+                            enforceExclusiveFamilyOpen(familyKey, wantUmp = false)
+                        }
+                    }
                 }
-                return@openDevice
+            }, mainHandler)
+        } catch (t: Exception) {
+            pendingOpenDeviceIds.remove(info.id)
+            if (isUmp) umpGuard.clearAttempt()
+            MidiDebugLog.e("openDevice threw id=${info.id} ump=$isUmp", t)
+            if (isUmp) {
+                familyWantUmp[familyKey] = false
+                enforceExclusiveFamilyOpen(familyKey, wantUmp = false)
             }
-            if (device == null) {
-                MidiDebugLog.e(
-                    "openDevice FAILED (null) id=${info.id} name=\"${deviceDisplayName(info)}\" " +
-                        "transport=${transportLabel(isUmp)} — USB permission or exclusive lock?",
-                )
-                return@openDevice
-            }
-            MidiDebugLog.i(
-                "openDevice OK id=${info.id} name=\"${deviceDisplayName(info)}\" " +
-                    "transport=${transportLabel(isUmp)}",
-            )
-            openDevices[info.id] = device
-            ensurePortsOpen(info, device, isUmp)
-            reconnectInputReceivers()
-        }, mainHandler)
+        }
     }
 
     private fun ensurePortsOpen(info: MidiDeviceInfo, device: MidiDevice, isUmp: Boolean) {
@@ -908,18 +1053,29 @@ class MidiEngine(
         val currentPort = inputs.firstOrNull {
             it.deviceId == current.endpoint.deviceId && it.portIndex == current.endpoint.portIndex
         }
-        val modxUmpExists = inputs.any { it.isModxFamily && it.isUmp && !it.isProbeApp }
+        val currentFamily = listedDevices[current.endpoint.deviceId]?.familyKey
+        val currentUmpBlocked = currentPort?.isUmp == true &&
+            currentFamily != null &&
+            umpGuard.isBlocked(currentFamily)
+
+        fun umpAllowed(port: PortInfo): Boolean {
+            val family = listedDevices[port.deviceId]?.familyKey ?: return !port.isUmp
+            return !port.isUmp || !umpGuard.isBlocked(family)
+        }
+
+        val modxUmpExists = inputs.any { it.isModxFamily && it.isUmp && !it.isProbeApp && umpAllowed(it) }
         val modxExists = inputs.any { it.isModxFamily && !it.isProbeApp }
         val keepCurrent = current.endpoint.isSet &&
             currentPort != null &&
             !currentPort.isProbeApp &&
+            !currentUmpBlocked &&
             !(currentPort.let { !it.isModxFamily && modxExists }) &&
-            // Prefer MODX UMP over MODX MIDI 1.0 when both appear (notes often on UMP).
+            // Prefer MODX UMP over MODX MIDI 1.0 when UMP is allowed.
             !(currentPort.isModxFamily && !currentPort.isUmp && modxUmpExists)
         if (keepCurrent) return current
 
         val preferred = inputs
-            .filter { !it.isProbeApp }
+            .filter { !it.isProbeApp && umpAllowed(it) }
             .let { clean ->
                 clean.firstOrNull { it.isModxFamily && it.isUmp }
                     ?: clean.firstOrNull { it.isModxFamily }
@@ -935,10 +1091,14 @@ class MidiEngine(
 
     private fun ensureTrackOutputs(song: Song, outputs: List<PortInfo>): Song {
         if (outputs.isEmpty()) return song
+        // Outputs must match the open transport for each family (exclusive MIDI1 vs UMP).
         val defaultRef = (
             outputs.filter { !it.isProbeApp }.let { clean ->
-                clean.firstOrNull { it.isModxFamily && it.isUmp }
+                val openIds = openDevices.keys + pendingOpenDeviceIds
+                clean.firstOrNull { it.isModxFamily && it.deviceId in openIds }
+                    ?: clean.firstOrNull { it.isModxFamily && !it.isUmp }
                     ?: clean.firstOrNull { it.isModxFamily }
+                    ?: clean.firstOrNull { it.deviceId in openIds }
                     ?: clean.firstOrNull()
             } ?: outputs.first()
             ).toRef()
@@ -1021,6 +1181,14 @@ class MidiEngine(
         if (Build.VERSION.SDK_INT >= 33) info.defaultProtocol else MidiDeviceInfoProtocol.PROTOCOL_UNKNOWN
 
     private fun transportLabel(isUmp: Boolean): String = if (isUmp) "UMP" else "MIDI1"
+
+    private fun deviceFamilyKey(info: MidiDeviceInfo, displayName: String): String =
+        MidiDeviceFamily.key(
+            serialNumber = info.properties.getString(MidiDeviceInfo.PROPERTY_SERIAL_NUMBER),
+            displayName = displayName,
+            productName = deviceProductName(info),
+            deviceId = info.id,
+        )
 
     private fun isProbeAppName(name: String?): Boolean {
         if (name.isNullOrBlank()) return false

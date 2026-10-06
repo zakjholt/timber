@@ -90,7 +90,13 @@ adb logcat -c
 adb logcat -s TimberMidi:I '*:S'
 ```
 
-Then in Timber: confirm device names include a **UMP** MODX entry → **Record in** → prefer `… · UMP · …` + **Omni** → arm → **Record** → wait for count-in → play notes. Expect `IN … type=UMP1…` or `UMP2…` with `wouldRecord=true`. If only MIDI 1.0 ports appear and no `IN` lines while playing, the keyboard is likely sending on a transport we still are not opening.
+Then in Timber: look for `MODX UMP: YES openMode=OPEN_UMP` (Timber opens **either** UMP **or** MIDI 1.0 for MODX — never both; dual-open crashed on Pixel SDK 37). Prefer Record in `… · UMP · …` + **Omni** → arm → **Record** → play. Expect `IN … UMP1/UMP2`. If a prior UMP open crashed the app, logs show `blocking UMP auto-open` and MIDI1 is used until app data is cleared.
+
+**Fatal crash capture** (if it still dies):
+
+```bash
+adb logcat -b crash -b main '*:E' AndroidRuntime:E TimberMidi:I '*:S'
+```
 
 ## Manual test (Pixel 11 Pro + MODX)
 
