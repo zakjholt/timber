@@ -68,7 +68,7 @@ Needs Android SDK 35, NDK, and a USB-host device for MODX testing.
 
 ### Debug APK (sideload + MIDI logcat)
 
-Debug builds log every MIDI input on **all** open ports under tag `TimberMidi`.
+Debug builds enumerate **MIDI 1.0 and UMP (MIDI 2.0)** devices, attach receivers on all open input ports, and log under tag `TimberMidi`. MODX defaults prefer UMP ports; apps like MidiTapLatencyTester are de-prioritized.
 
 **Local**
 
@@ -83,14 +83,14 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb install -r timber-debug.apk
 ```
 
-**Capture logs** (OTG + MODX connected, Local Control off):
+**Capture logs** (OTG + MODX connected, Local Control off; quit MidiTapLatencyTester if open):
 
 ```bash
 adb logcat -c
 adb logcat -s TimberMidi:I '*:S'
 ```
 
-Then in Timber: confirm device names under the title → **Record in** → try each MODX input port with **Omni** → arm a track → **Record** → wait for count-in to finish → play notes. Look for `IN ... wouldRecord=` lines; `selectedIn=false` means notes arrived on a different port than Record in.
+Then in Timber: confirm device names include a **UMP** MODX entry → **Record in** → prefer `… · UMP · …` + **Omni** → arm → **Record** → wait for count-in → play notes. Expect `IN … type=UMP1…` or `UMP2…` with `wouldRecord=true`. If only MIDI 1.0 ports appear and no `IN` lines while playing, the keyboard is likely sending on a transport we still are not opening.
 
 ## Manual test (Pixel 11 Pro + MODX)
 
